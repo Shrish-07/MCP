@@ -49,6 +49,18 @@ async def main() -> int:
     selector = WeeklySelector(cfg)
     log.info("selector created: enabled=%s universe_size=%d", selector.enabled, selector.universe_size)
 
+    # Stub the sentiment model so the harness is truly offline-deterministic
+    # and runs WITHOUT the torch/transformers stack (CI-friendly). The real
+    # ModernBERT model is covered separately by tests/test_sentiment.py,
+    # which is marked `heavy` and deselected by default.
+    import core.sentiment_model as _sm
+
+    class _StubSentimentModel:
+        def score_single(self, headline: str) -> float:
+            return 0.0
+
+    _sm.get_sentiment_model = lambda: _StubSentimentModel()
+
     # Stub news fetcher and scoring so verification is deterministic offline.
     # SIM_* tickers get very negative scores so a sold position is never
     # re-selected as a fresh candidate.

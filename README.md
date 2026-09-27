@@ -13,7 +13,7 @@ Key design decisions baked into the code:
 - **Anthropic only.** The legacy OpenAI-based routing/extraction stack was removed entirely. Every model call goes through `utils/anthropic_client.py`.
 - **MCP-native data.** Market data and broker actions come from Robinhood's official trading MCP server via the `mcp` Python SDK — a direct connection that replaced an earlier, expensive `claude --print` shelling approach. No LLM tokens are spent fetching data.
 - **Deterministic risk guardrails.** Stop-loss, take-profit, max positions, position sizing, and safe execution windows are enforced in plain Python (`core/execution.py`, `core/position_manager.py`), never left to the model.
-- **DRY_RUN enforced in code.** Even if DRY_RUN isn't set, execution logic treats missing config as dry-run; live order placement only happens when DRY_RUN is explicitly false.
+- **Dry-run by default, config-driven.** The single live-trading switch is `trading.dry_run` in `config/settings.json` (shipped as `true`). Live order placement only happens when it is deliberately set to `false`; a missing value always means dry-run, and a loud startup banner states which mode is active.
 - **LLM cost budgeting.** Every model usage is metered and persisted (`utils/cost_tracker.py`) with hard daily/monthly ceilings.
 
 ---
@@ -59,11 +59,9 @@ Key design decisions baked into the code:
 robinhood-agent/
 ├── main.py                     # Entry point. TradingAgent: config, scheduler, cycles, monitor.
 ├── README.md                   # This file.
-├── requirements.txt            # Dependency pin list (note: UTF-16 encoded).
-├── .env                        # Secrets (FINNHUB_API_KEY, ANTHROPIC_API_KEY, DRY_RUN…). Not committed.
-├── mcp_diagnostic_v2.py        # Standalone read-only OAuth+MCP connectivity probe.
-├── mcp_deep_schema_dump.py     # Enumerates MCP tool schemas once (development aid).
-├── .claude/settings.local.json # Claude Code allow-list of Robinhood MCP tools (legacy CLI).
+├── requirements.txt            # Core dependency pins (ML extras: requirements-ml.txt; dev: requirements-dev.txt).
+├── .env                        # Secrets only (ANTHROPIC_API_KEY, FINNHUB_API_KEY). Not committed.
+├── .claude/settings.local.json # Claude Code allow-list of Robinhood MCP tools (legacy CLI, machine-local).
 │
 ├── config/settings.json        # Tunables: models, trading, schedule, watchlist, news, costs.
 │
@@ -83,8 +81,7 @@ robinhood-agent/
 │   └── portfolio.py            # PositionRecord, Position, Portfolio.
 │
 ├── robinhood_mcp/
-│   ├── robinhood_client.py                 # Direct MCP client (OAuth) — ACTIVE.
-│   ├── robinhood_client(claude version).py # Older CLI subprocess client — legacy/unused.
+│   ├── robinhood_client.py     # Direct MCP client (OAuth) — the only transport.
 │   └── response_recorder.py    # Observability: traces/filters MCP responses.
 │
 ├── utils/
@@ -94,11 +91,21 @@ robinhood-agent/
 │   ├── journal_manager.py      # Per-ticker rolling journals for model memory.
 │   └── logger.py               # UTC console/file logs + JSON trade log config.
 │
-├── data/
-│   ├── earnings_calendar.json  # Cached upcoming RH earnings.
-│   └── seen_headlines.json     # Finnhub article-id dedup state for the day.
+├── scripts/
+│   ├── verify_weekly_layer.py  # Offline-deterministic weekly-selection harness (also run in CI).
+│   ├── mcp_diagnostic_v2.py    # Standalone read-only OAuth+MCP connectivity probe.
+│   └── mcp_deep_schema_dump.py # Enumerates MCP tool schemas once (development aid).
 │
-├── journals/                   # Per-ticker history (TICKER.json) + Inactive/.
+├── tests/                      # Pytest suite: ticker selector, weekly e2e (heavy: sentiment model).
+│
+├── .github/                    # CI (tests + gitleaks secret scan), CODEOWNERS, PR template.
+│
+├── data/
+│   ├── candidate_universe.json # Candidate pool for weekly sentiment selection (tracked config).
+│   ├── earnings_calendar.json  # Cached upcoming RH earnings (runtime, git-ignored).
+│   └── seen_headlines.json     # Finnhub article-id dedup state for the day (runtime, git-ignored).
+│
+├── journals/                   # Per-ticker history (TICKER.json) — per-user, git-ignored.
 └── logs/                       # Runtime output & state (auto-created).
     ├── agent.log               # Main DEBUG log (UTC).
     ├── trades.json             # JSON array of every trade attempt.
@@ -292,7 +299,7 @@ Risk is enforced deterministically in code, independent of the model's judgment:
 
 **Response cleanup helpers** coerce Robinhood's string-typed numerics into floats (`_coerce_portfolio_fields`), unwrap nested `buying_power`, and remap quote/historicals fields into the Pydantic models — identical business logic to the validated legacy version.
 
-**Legacy file.** `robinhood_mcp/robinhood_client(claude version).py` is the old CLI-subprocess implementation and is **no longer used**.
+**Legacy file.** The old CLI-subprocess implementation (formerly `robinhood_client(claude version).py`) has been **removed from the repository**; the direct MCP client above is the only transport.
 
 ---
 
@@ -333,6 +340,28 @@ All state lives under `logs/` and `journals/` (auto-created by the app).
 - **`data/seen_headlines.json`** — Finnhub article-id dedup state so news isn't re-shown to the model every cycle of the same day.
 
 **Logging** (`utils/logger.py`): a `robinhood-agent` logger routes to console (INFO) + `agent.log` (DEBUG), and a separate `robinhood-agent.trades` logger streams JSON lines to `logs/trades.json` (note: `ExecutionEngine` also writes `trades.json` directly). All times are UTC.
+
+---
+
+## Where Your Data Lives (per-user state)
+
+Everything the agent records is **local to your machine** and private to you. It is generated at runtime, unique per user, and **git-ignored** so it can never be pushed to a remote:
+
+| Path | Created by | Git status |
+|---|---|---|
+| `logs/positions.json`, `logs/trades.json`, `logs/performance.json`, `logs/agent.log`, `logs/cost_tracker.json`, `logs/*.jsonl` (MCP traces) | `PositionManager`, `ExecutionEngine`, `utils/logger.py`, `CostTracker`, `response_recorder` | ignored |
+| `journals/<TICKER>.json` | `JournalManager` | ignored |
+| `data/seen_headlines.json`, `data/earnings_calendar.json`, `data/selected_universe.json`, `data/weekly_news_cache.json` | `NewsFetcher`, `EarningsCalendar`, `WeeklySelector`, `WeeklyNewsFetcher` | ignored |
+| `.rh_oauth_cache.json` | `RobinhoodMCPClient` (Robinhood OAuth tokens) | ignored |
+| `.env` | you (API keys) | ignored |
+
+A fresh clone recreates all of these automatically on first run — nothing in the repository ships with pre-existing trading history, journals, or traces. See [SECURITY.md](SECURITY.md) for why the MCP trace files (which contain real account numbers) must never be committed.
+
+## Security & Contributing
+
+- Security policy and the full local-data inventory: [SECURITY.md](SECURITY.md)
+- Contribution rules, dev setup, test commands, and the never-commit list: [CONTRIBUTING.md](CONTRIBUTING.md)
+- CI (`.github/workflows/ci.yml`) runs the test suite, the offline verification harness, and a **gitleaks secret scan** on every pull request; `main` is protected and changes require the code owner's approval (`.github/CODEOWNERS`).
 
 ---
 
@@ -398,20 +427,18 @@ Unknown models default to Sonnet pricing. `record()` computes cost from regular 
 }
 ```
 
-### `.env` (secrets / environment)
+### `.env` (secrets only)
 
 - `FINNHUB_API_KEY` — for `NewsFetcher` (company + general market news).
 - `ANTHROPIC_API_KEY` — for `anthropic.AsyncAnthropic` (the model provider).
-- `DRY_RUN` — **the primary live-trading gate.** Resolution: env `DRY_RUN` if set, else `config/settings.json` → `trading.dry_run`, then `.lower() != "false"`. An explicit `DRY_RUN=false` is what enables live order placement; `ExecutionEngine` also forces dry-run via an OR with its own dry-run flag (default true), so a missing/ambiguous value never enables live trading accidentally.
-- `ROBINHOOD_MCP_URL` — optional explicit MCP endpoint override (default is the well-known `https://agent.robinhood.com/mcp/trading` in the client).
 
-> There is currently **no `.env.example`** in the repo (the legacy README referenced one); the values above must be provided in a `.env` you create.
+These are the **only** values that belong in `.env` — see `.env.example` for a template. Every other setting, including dry-run (`trading.dry_run`), the MCP endpoint (`robinhood.mcp_url`), and the log level (`logging.level`), lives in `config/settings.json`, the single source of truth for all toggles. A legacy `DRY_RUN` value in the environment is ignored with a loud warning.
 
 ### Initialization order (`TradingAgent.__init__`)
 
-`AsyncIOScheduler(timezone="America/New_York")` → `_load_config()` (loads `config/settings.json` + `.env`) → `CostTracker()` (singleton) → `RobinhoodMCPClient()` → `DataIngestLayer` → `MetricsEngine` → `NewsFetcher(AnthropicClient(cheap model), FINNHUB_API_KEY, settings)` → `JournalManager` → `EarningsCalendar()` (+ `set_client(mcp_client)`) → `DecisionEngine(AnthropicClient(decision model), journal_manager, earnings_calendar, settings)` → `PositionManager` → `PnLTracker(mcp_client)` → `ExecutionEngine(mcp_client, position_manager, settings)`. Monitor state locks/caches are then initialised.
+`AsyncIOScheduler(timezone="America/New_York")` → `_load_config()` (loads `config/settings.json` + `.env`) → `CostTracker()` (singleton) → `RobinhoodMCPClient(mcp_url from config)` → `DataIngestLayer` → `MetricsEngine` → `NewsFetcher(AnthropicClient(cheap model), FINNHUB_API_KEY, settings)` → `JournalManager` → `EarningsCalendar()` (+ `set_client(mcp_client)`) → `DecisionEngine(AnthropicClient(decision model), journal_manager, earnings_calendar, settings)` → `PositionManager(max_holding_days from config)` → `PnLTracker(mcp_client)` → `ExecutionEngine(mcp_client, position_manager, settings)`. Monitor state locks/caches are then initialised.
 
-**DRY_RUN resolution (exact):** `_load_config` computes `dry_run = os.getenv("DRY_RUN", str(settings.trading.dry_run)).lower() != "false"`. So `.env`'s `DRY_RUN` wins if present; if unset it falls back to `config/settings.json` → `trading.dry_run`. `ExecutionEngine` further enforces `effective_dry_run = bool(settings.env.DRY_RUN, default=True) or bool(dry_run_param)`, so live orders require DRY_RUN to be explicitly `"false"` **and** no forced dry-run flag to be passed. This belt-and-suspenders means a missing value never silently enables live trading.
+**Dry-run resolution (exact):** `_load_config` reads `trading.dry_run` from `config/settings.json`, defaulting to `true` when the key is missing (string values are coerced defensively). A legacy `DRY_RUN` value in the environment is **ignored** with a loud warning — the JSON config is the only toggle source. `ExecutionEngine` further enforces `effective_dry_run = bool(settings.env.DRY_RUN, default=True) or bool(dry_run_param)`, so live orders require `trading.dry_run: false` **and** no forced dry-run flag to be passed. This belt-and-suspenders means a missing value never silently enables live trading. `start()` also logs a loud banner stating which mode is active.
 
 ---
 
@@ -419,16 +446,16 @@ Unknown models default to Sonnet pricing. `record()` computes cost from regular 
 
 1. **Python 3.11+** (the code uses modern typing / async).
 2. Create a virtual environment and activate it.
-3. Install dependencies: `pip install -r requirements.txt` (includes `anthropic`, `apscheduler>=3.11`, `httpx`, `mcp`, `pydantic`, `pytz`, `python-dotenv`, `uvicorn`, etc.).
-4. Create `.env` with `ANTHROPIC_API_KEY`, `FINNHUB_API_KEY`, and `DRY_RUN=true` (start in dry-run).
+3. Install dependencies: `pip install -r requirements.txt` (includes `anthropic`, `apscheduler>=3.11`, `httpx`, `mcp`, `pydantic`, `pytz`, `python-dotenv`, `uvicorn`, etc.). Add `pip install -r requirements-ml.txt` **only** if you enable weekly sentiment selection, and `pip install -r requirements-dev.txt` for the test suite.
+4. Create `.env` with your two API keys only (`ANTHROPIC_API_KEY`, `FINNHUB_API_KEY` — see `.env.example`). All other configuration, including dry-run (on by default), lives in `config/settings.json`.
 5. **(First run only)** Authenticate with Robinhood — the app opens the browser for the one-time OAuth approval; a `.rh_oauth_cache.json` is then reused/silently refreshed on later runs. Requires an active Robinhood **Agentic** account configured to allow (`agentic_allowed=true`).
 6. Run: `python main.py`
 
 > The legacy setup step `claude mcp add robinhood-trading --transport http https://agent.robinhood.com/mcp/trading` is no longer required for the active code path (the client connects directly). It is retained for reference and for the legacy `.claude` permission allow-list.
 
 **Execution modes:**
-- **Dry-run (default):** `DRY_RUN=true` (or unset) → every trade is validated and logged as `SIMULATED` / `WOULD_EXECUTE` but no real orders are placed.
-- **Live:** only after you review the logic, set `DRY_RUN=false` in `.env` AND keep `trading.dry_run` consistent; live orders flow through `review_equity_order` / `place_equity_order` only after passing all code-level risk checks and the safe-window gate.
+- **Dry-run (default):** `trading.dry_run: true` in `config/settings.json` → every trade is validated and logged as `SIMULATED` / `WOULD_EXECUTE` but no real orders are placed.
+- **Live:** only after you review the logic, set `trading.dry_run: false` in `config/settings.json`; live orders flow through `review_equity_order` / `place_equity_order` only after passing all code-level risk checks and the safe-window gate.
 
 ---
 

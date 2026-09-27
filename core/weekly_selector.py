@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from core.sentiment_model import get_sentiment_model
 from core.weekly_news import WeeklyNewsFetcher
 from core.ticker_selector import select_universe
 from core.position_manager import PositionManager
@@ -50,8 +48,18 @@ class WeeklySelector:
         self.logger.info("weekly_selector_initializing")
         self.candidate_universe = await self._load_candidate_universe()
         self.selected_universe = await self._load_selected_universe()
-        # Lazy-load the sentiment model once
-        self.sentiment_model = get_sentiment_model()
+        # Lazy-load the sentiment model once. The import lives HERE (not at
+        # module top level) so the agent starts fine without the heavy
+        # torch/transformers stack when sentiment selection is disabled.
+        from core.sentiment_model import get_sentiment_model
+        try:
+            self.sentiment_model = get_sentiment_model()
+        except ImportError as exc:
+            self.logger.error(
+                "sentiment model unavailable - install requirements-ml.txt "
+                "to enable sentiment selection: %s", exc,
+            )
+            self.sentiment_model = None
         self.logger.info(
             "weekly_selector_initialized candidates=%d previous_selection=%d",
             len(self.candidate_universe), len(self.selected_universe),
@@ -103,7 +111,7 @@ class WeeklySelector:
             data = {
                 "tickers": tickers,
                 "scores": scores,
-                "timestamp": datetime.now(pytz.UTC).isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "universe_size": self.universe_size,
             }
             with open(self.selected_universe_path, "w", encoding="utf-8") as f:

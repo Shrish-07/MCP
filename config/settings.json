@@ -11,7 +11,13 @@
     "profit_review_pct": 0.15,
     "max_holding_days": 15,
     "portfolio_size": 2000,
-    "dry_run": false
+    "dry_run": true
+  },
+  "robinhood": {
+    "mcp_url": "https://agent.robinhood.com/mcp/trading"
+  },
+  "logging": {
+    "level": "INFO"
   },
   "schedule": {
     "open_hour": 9,

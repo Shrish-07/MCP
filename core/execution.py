@@ -20,6 +20,7 @@ class ExecutionEngine:
         self.position_manager = position_manager
         self.settings = settings
         self._edge_threshold = float(settings.get("trading", {}).get("edge_score_threshold", 3.0))
+        self._max_position_pct = float(settings.get("trading", {}).get("max_position_pct", 0.08))
         self.logger = logging.getLogger("robinhood-agent.core.execution")
         self._trades_path = Path(__file__).resolve().parent.parent / "logs" / "trades.json"
         self._trades_path.parent.mkdir(exist_ok=True)
@@ -27,7 +28,7 @@ class ExecutionEngine:
             self._trades_path.write_text("[]", encoding="utf-8")
 
     @staticmethod
-    def _size_from_edge(total: float) -> float:
+    def _size_from_edge(total: float, max_position_pct: float = 0.08) -> float:
         """Map computed edge total into a position size percentage.
 
         Ranges:
@@ -35,20 +36,30 @@ class ExecutionEngine:
           3.5 <= total < 4.0 -> 4%
           4.0 <= total < 4.5 -> 6%
           4.5 <= total       -> 8%
+
+        The result is clamped to `max_position_pct` (from
+        `trading.max_position_pct` in config/settings.json) so the configured
+        per-position cap is always respected.
         """
         try:
             t = float(total or 0.0)
         except Exception:
             return 0.0
         if t >= 4.5:
-            return 0.08
-        if t >= 4.0:
-            return 0.06
-        if t >= 3.5:
-            return 0.04
-        if t >= 3.0:
-            return 0.03
-        return 0.0
+            size = 0.08
+        elif t >= 4.0:
+            size = 0.06
+        elif t >= 3.5:
+            size = 0.04
+        elif t >= 3.0:
+            size = 0.03
+        else:
+            return 0.0
+        try:
+            cap = float(max_position_pct or 0.08)
+        except Exception:
+            cap = 0.08
+        return min(size, cap)
 
     def _is_safe_execution_window(self) -> bool:
         """Return True when current NY time is safe for execution (not in blocked windows).
@@ -170,7 +181,7 @@ class ExecutionEngine:
             side = "sell"
         else:
             # compute position size from edge total
-            position_size_pct = self._size_from_edge(edge_total)
+            position_size_pct = self._size_from_edge(edge_total, self._max_position_pct)
             position_size_pct = min(position_size_pct, float(self.settings.get("trading", {}).get("max_position_pct", 0.08)))
             if position_size_pct <= 0:
                 self.logger.info(

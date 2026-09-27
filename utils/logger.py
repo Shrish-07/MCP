@@ -17,8 +17,12 @@ class UTCFormatter(logging.Formatter):
         return dt.isoformat(timespec="seconds")
 
 
-def configure_logging() -> logging.Logger:
-    """Configure console, file, and JSON trade logging handlers."""
+def configure_logging(level: str = "INFO") -> logging.Logger:
+    """Configure console, file, and JSON trade logging handlers.
+
+    `level` (from config/settings.json -> logging.level) sets the console
+    handler level; the file handler always records DEBUG for diagnostics.
+    """
     base = Path(__file__).resolve().parent.parent
     logs_dir = base / "logs"
     logs_dir.mkdir(exist_ok=True)
@@ -32,7 +36,7 @@ def configure_logging() -> logging.Logger:
             logger.removeHandler(handler)
 
     console = logging.StreamHandler(sys.stdout)
-    console.setLevel(logging.INFO)
+    console.setLevel(getattr(logging, str(level).upper(), logging.INFO))
     console.setFormatter(UTCFormatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s"))
     logger.addHandler(console)
 

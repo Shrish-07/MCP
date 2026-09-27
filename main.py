@@ -108,7 +108,9 @@ class TradingAgent:
         self.scheduler = AsyncIOScheduler(timezone="America/New_York")
         self.config = self._load_config()
         self.cost_tracker = CostTracker()
-        self.mcp_client = RobinhoodMCPClient()
+        self.mcp_client = RobinhoodMCPClient(
+            mcp_url=self.config.get("robinhood", {}).get("mcp_url") or None,
+        )
         self.ingest = DataIngestLayer(self.mcp_client)
         self.metrics_engine = MetricsEngine()
         self.news_fetcher = NewsFetcher(
@@ -125,7 +127,9 @@ class TradingAgent:
             self.earnings_calendar,
             settings=self.config,
         )
-        self.position_manager = PositionManager()
+        self.position_manager = PositionManager(
+            max_holding_days=int(self.config.get("trading", {}).get("max_holding_days", 15)),
+        )
         self.pnl_tracker = PnLTracker(self.mcp_client)
         self.executor = ExecutionEngine(self.mcp_client, self.position_manager, self.config)
         self._cached_watchlist: list[str] = []
@@ -148,15 +152,32 @@ class TradingAgent:
     # ==================================================================
 
     def _load_config(self) -> dict:
-        load_dotenv(".env", override=False)
+        load_dotenv(".env", override=False)  # .env carries SECRETS ONLY (API keys)
         base = Path(__file__).resolve().parent
         with (base / "config" / "settings.json").open("r", encoding="utf-8") as handle:
             settings = json.load(handle)
-        dry_run = os.getenv("DRY_RUN", str(settings.get("trading", {}).get("dry_run", True))).lower() != "false"
+
+        # ---- DRY RUN: config/settings.json is the single source of truth ----
+        # The shipped default is dry-run; live trading only ever happens when
+        # a user deliberately sets trading.dry_run = false in their config.
+        trading = settings.setdefault("trading", {})
+        dry_run = trading.get("dry_run", True)
+        if not isinstance(dry_run, bool):
+            dry_run = str(dry_run).strip().lower() != "false"
+        trading["dry_run"] = bool(dry_run)
+
+        # The legacy DRY_RUN env var is intentionally IGNORED (settings.json is
+        # the only toggle source). Warn loudly if someone still sets it.
+        if os.getenv("DRY_RUN"):
+            self.logger.warning(
+                "DRY_RUN found in the environment/.env is no longer used - "
+                "set trading.dry_run in config/settings.json instead"
+            )
+
         settings["env"] = {
             "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
-            "ROBINHOOD_MCP_URL": os.getenv("ROBINHOOD_MCP_URL", ""),
-            "DRY_RUN": dry_run,
+            "FINNHUB_API_KEY": os.getenv("FINNHUB_API_KEY", ""),
+            "DRY_RUN": trading["dry_run"],
         }
         return settings
 
@@ -897,7 +918,10 @@ class TradingAgent:
                 pass
             if result.status in ("EXECUTED", "WOULD_EXECUTE"):
                 if decision.decision in (DecisionType.BUY, DecisionType.ROTATE):
-                    size_pct = ExecutionEngine._size_from_edge(decision.edge.total)
+                    size_pct = ExecutionEngine._size_from_edge(
+                        decision.edge.total,
+                        self.config.get("trading", {}).get("max_position_pct", 0.08),
+                    )
                     effective_buying_power -= size_pct * portfolio.total_value
                     effective_positions_count += 1
                     # newly opened this cycle — 0% unrealized, so the very
@@ -959,8 +983,18 @@ class TradingAgent:
         report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     async def start(self) -> None:
-        configure_logging()
+        configure_logging(level=self.config.get("logging", {}).get("level", "INFO"))
         self.logger.info("agent_start dry_run=%s", self.config["env"]["DRY_RUN"])
+        if self.config["env"]["DRY_RUN"]:
+            self.logger.warning(
+                "*** DRY_RUN ACTIVE - no live orders will be placed. "
+                "(set trading.dry_run=false in config/settings.json to enable live trading) ***"
+            )
+        else:
+            self.logger.warning(
+                "*** LIVE TRADING ENABLED - real orders will be placed "
+                "against your Robinhood account ***"
+            )
 
         schedule = self.config.get("schedule", {})
         open_h = int(schedule.get("open_hour", 9))

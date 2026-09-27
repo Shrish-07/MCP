@@ -1,0 +1,9 @@
+# ML/Sentiment dependencies - install ONLY if you enable
+# sentiment_selection.enabled in config/settings.json.
+# (torch + transformers are a ~2GB+ install; the core agent runs without them
+# when sentiment-based ticker selection is disabled.)
+transformers==5.16.1
+torch==2.13.0
+accelerate==1.14.0
+huggingface-hub==1.29.0
+safetensors==0.8.0

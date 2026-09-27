@@ -17,7 +17,7 @@ ARCHITECTURE CHANGE FROM PREVIOUS VERSION:
     PKCE flow against Robinhood's own published endpoints. Zero LLM calls,
     zero subprocess, zero token cost anywhere in this file. This was
     validated end-to-end against the real Robinhood MCP server and a real
-    $2,000 Agentic account before this rewrite was written — every phase
+    Agentic account before this rewrite was written — every phase
     (registration, browser auth, token refresh, tool discovery, and a live
     get_portfolio call returning real account data) passed.
 
@@ -167,9 +167,11 @@ class RobinhoodMCPClient:
     cached and refreshed automatically across runs.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, mcp_url: str | None = None) -> None:
         self.logger = logging.getLogger("robinhood-agent.mcp")
         self.max_retries = 3
+        # Configurable via config/settings.json -> robinhood.mcp_url
+        self._mcp_url = mcp_url or ROBINHOOD_MCP_URL
         self._cached_account_number: str = ""
         self._token_cache: dict[str, Any] = {}
         self._token_lock = asyncio.Lock()
@@ -382,7 +384,7 @@ class RobinhoodMCPClient:
                 access_token = await self._ensure_valid_token()
                 headers = {"Authorization": f"Bearer {access_token}"}
 
-                async with streamablehttp_client(ROBINHOOD_MCP_URL, headers=headers, timeout=30) as (read, write, _sid):
+                async with streamablehttp_client(self._mcp_url, headers=headers, timeout=30) as (read, write, _sid):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         result = await session.call_tool(tool_name, arguments)

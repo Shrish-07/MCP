@@ -215,7 +215,7 @@ METRIC DEFINITIONS (use these exact definitions, do not infer others)
 
 RULES (non-overridable)
 - Max position size: 10% of portfolio
-- Max open positions: 12
+- Max open positions: {MAX_POSITIONS}
 - Only recommend opening a position when the computed edge.total >= {EDGE_THRESHOLD}
 - Prefer IGNORE/HOLD. ROTATE only when incoming edge >= 4.0 and clearly
   superior to the weakest current holding.
@@ -274,9 +274,11 @@ Return only valid JSON with this schema (no markdown or extra text):
         self.earnings_calendar = earnings_calendar
         self._settings = settings or {}
         self._edge_threshold = float(self._settings.get("trading", {}).get("edge_score_threshold", 3.0))
+        self._max_positions = int(self._settings.get("trading", {}).get("max_positions", 12))
         self.logger = logging.getLogger("robinhood-agent.core.decision_engine")
         # Build the system prompt with the live threshold interpolated
         _prompt_text = self.SYSTEM_PROMPT_TEXT.replace("{EDGE_THRESHOLD}", f"{self._edge_threshold:g}")
+        _prompt_text = _prompt_text.replace("{MAX_POSITIONS}", str(self._max_positions))
         self.system_prompt = [
             {
                 "type": "text",
@@ -435,7 +437,7 @@ Return only valid JSON with this schema (no markdown or extra text):
             )
 
             # Enforce max open positions (decision-level only)
-            if existing_positions_count >= 12 and decision.decision == DecisionType.BUY:
+            if existing_positions_count >= self._max_positions and decision.decision == DecisionType.BUY:
                 decision.decision = DecisionType.IGNORE
 
             # CLOSE-cycle override: do not open new BUYs (size resolved at execution)
@@ -594,7 +596,7 @@ Return only valid JSON with this schema (no markdown or extra text):
             f"  P/E Ratio: {metrics.pe_ratio:.2f}\n"
             f"  Dividend Yield: {metrics.dividend_yield:.2f}%\n\n"
             f"ACCOUNT: total_value={portfolio.total_value:.2f}, effective_buying_power={effective_buying_power:.2f}, "
-            f"positions_count={existing_positions_count}, max_positions=12\n"
+            f"positions_count={existing_positions_count}, max_positions={self._max_positions}\n"
             f"{roster_line}\n\n"
             + (
                 f"EXISTING POSITION: {position_record.ticker}\n"

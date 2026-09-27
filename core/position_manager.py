@@ -53,8 +53,10 @@ class PositionManager:
 
     REVIEW_GAIN_PCT = 0.15  # 15% gain triggers a soft review
 
-    def __init__(self, path: str | None = None) -> None:
+    def __init__(self, path: str | None = None, max_holding_days: int = 15) -> None:
         self.logger = logging.getLogger("robinhood-agent.core.position_manager")
+        # `trading.max_holding_days` from config/settings.json (wired in main.py)
+        self.max_holding_days = int(max_holding_days)
         self._path = Path(path) if path else Path(__file__).resolve().parent.parent / "logs" / "positions.json"
         self._path.parent.mkdir(exist_ok=True)
         if not self._path.exists():
@@ -431,7 +433,7 @@ class PositionManager:
                 days_held = (datetime.now(timezone.utc).date() - datetime.fromisoformat(record.entry_date).date()).days
             except Exception:
                 days_held = 0
-            max_holding = days_held > 15
+            max_holding = days_held > self.max_holding_days
 
             # Combine signals: if both conditions apply, emit a single combined signal.
             if profit_review and max_holding:
