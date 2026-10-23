@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from core.decision_engine import DecisionEngine
+from core.decision.engine import DecisionEngine
 from models.decisions import DecisionType
 
 
@@ -53,6 +53,6 @@ def test_decision_parsing_case_insensitive():
 
 def test_strip_fences_single_source():
     from utils.anthropic_client import strip_fences
-    from core.decision_engine import DecisionEngine as DE
+    from core.decision.engine import DecisionEngine as DE
     assert strip_fences("```json\n{\"a\":1}\n```") == '{"a":1}'
     assert DE._strip_fences("```json\n{\"a\":1}\n```") == '{"a":1}'  # same behaviour

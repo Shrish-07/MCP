@@ -26,8 +26,8 @@ WHAT STAYS IDENTICAL:
     models), and every piece of business logic for cleaning up Robinhood's
     response shapes (string-to-float coercion, nested buying_power
     extraction, quote/historicals field remapping) is preserved exactly
-    as validated in the previous version. Callers in core/data_ingest.py,
-    core/execution.py, and elsewhere do not need to change.
+    as validated in the previous version. Callers in core/data/ingest.py,
+    core/execution/engine.py, and elsewhere do not need to change.
 
 WHAT'S NEW AND IMPORTANT:
     - Direct calls require `account_number` as an explicit argument for

@@ -9,14 +9,14 @@ from pathlib import Path
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from core.data_ingest import DataIngestLayer
-from core.decision_engine import DecisionEngine
-from core.execution import ExecutionEngine
-from core.metrics import MetricsEngine
-from core.news_fetch import NewsFetcher
+from core.data.ingest import DataIngestLayer
+from core.decision.engine import DecisionEngine
+from core.execution.engine import ExecutionEngine
+from core.data.metrics import MetricsEngine
+from core.data.news import NewsFetcher
 from models.news import NewsItem
-from core.pnl_tracker import PnLTracker
-from core.position_manager import PositionManager, ExitSignal, position_snapshot
+from core.position.pnl_tracker import PnLTracker
+from core.position.manager import PositionManager, ExitSignal, position_snapshot
 from robinhood_mcp.robinhood_client import RobinhoodMCPClient
 from models.decisions import (
     DecisionType, CycleType, JournalEntry, TradeDecision, StructuredEdgeScore,
@@ -30,12 +30,12 @@ from utils.journal_manager import JournalManager
 from utils.earnings_calendar import EarningsCalendar
 from utils.anthropic_client import AnthropicClient
 from utils.cost_tracker import CostTracker
-from core.weekly_selector import WeeklySelector, get_weekly_selector
+from core.weekly.selector import WeeklySelector, get_weekly_selector
 from utils.logger import configure_logging
 
 
 # Canonical exit-review rubric now lives in models.decisions (shared with
-# core/decision_engine.py) — imported above as EXIT_REVIEW_RULES.
+# core/decision/engine.py) — imported above as EXIT_REVIEW_RULES.
 
 
 # Compact monitor-only system prompt for the 1-minute threshold path (~300 tokens).

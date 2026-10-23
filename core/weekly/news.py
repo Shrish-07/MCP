@@ -15,7 +15,7 @@ import httpx
 from models.news import NewsItem
 from utils.rate_limit import RateLimiter
 
-logger = logging.getLogger("robinhood-agent.core.weekly_news")
+logger = logging.getLogger("robinhood-agent.core.weekly.news")
 
 _FINNHUB_COMPANY_NEWS = "https://finnhub.io/api/v1/company-news"
 
@@ -32,7 +32,7 @@ class WeeklyNewsFetcher:
         self.lookback_days = lookback_days
         self.max_retries = max_retries
         self._api_key = os.getenv("FINNHUB_API_KEY", "")
-        self._cache_dir = Path(__file__).resolve().parent.parent / "data"
+        self._cache_dir = Path(__file__).resolve().parent.parent.parent / "data"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._cache_file = self._cache_dir / "weekly_news_cache.json"
         self._cache = self._load_cache()

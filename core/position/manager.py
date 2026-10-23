@@ -65,8 +65,8 @@ class PositionManager:
     DEFAULT_STOP_LOSS_PCT = -0.07
 
     def __init__(self, path: str | None = None, config: dict | None = None) -> None:
-        self.logger = logging.getLogger("robinhood-agent.core.position_manager")
-        self._path = Path(path) if path else Path(__file__).resolve().parent.parent / "logs" / "positions.json"
+        self.logger = logging.getLogger("robinhood-agent.core.position.manager")
+        self._path = Path(path) if path else Path(__file__).resolve().parent.parent.parent / "logs" / "positions.json"
         self._path.parent.mkdir(exist_ok=True)
         if not self._path.exists():
             self._path.write_text("[]", encoding="utf-8")

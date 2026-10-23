@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 
-from core.execution import ExecutionEngine
-from core.position_manager import PositionManager
+from core.execution.engine import ExecutionEngine
+from core.position.manager import PositionManager
 from models.decisions import DecisionType, StructuredEdgeScore, TradeDecision
 from models.portfolio import Portfolio
 

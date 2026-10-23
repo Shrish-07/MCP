@@ -1,0 +1,1 @@
+"""Data pipeline: MCP ingest, market metrics, news, and sentiment scoring."""

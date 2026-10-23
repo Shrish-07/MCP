@@ -11,12 +11,12 @@ from typing import Any
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from core.sentiment_model import get_sentiment_model
-from core.weekly_news import WeeklyNewsFetcher
-from core.ticker_selector import select_universe
-from core.position_manager import PositionManager
+from core.data.sentiment import get_sentiment_model
+from core.weekly.news import WeeklyNewsFetcher
+from core.weekly.ticker_selector import select_universe
+from core.position.manager import PositionManager
 
-logger = logging.getLogger("robinhood-agent.core.weekly_selector")
+logger = logging.getLogger("robinhood-agent.core.weekly.selector")
 
 
 class WeeklySelector:
@@ -33,7 +33,7 @@ class WeeklySelector:
         self.lookback_days = int(ss.get("lookback_days", 7))
         self.min_sentiment_score = float(ss.get("min_sentiment_score", -1.0))
 
-        self.data_dir = Path(__file__).resolve().parent.parent / "data"
+        self.data_dir = Path(__file__).resolve().parent.parent.parent / "data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.selected_universe_path = self.data_dir / "selected_universe.json"
         self.candidate_universe_path = self.data_dir / "candidate_universe.json"

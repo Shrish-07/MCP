@@ -7,7 +7,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from core.position_manager import PositionManager
+from core.position.manager import PositionManager
 from models.decisions import DecisionType, ExecutionResult, StructuredEdgeScore, TradeDecision
 from models.market_data import EquityQuote
 from models.portfolio import Portfolio, Position

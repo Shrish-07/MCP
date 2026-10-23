@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from core.sentiment_model import get_sentiment_model, score_single_headline
+from core.data.sentiment import get_sentiment_model, score_single_headline
 
 
 def test_sentiment_model_loads():

@@ -10,7 +10,7 @@ from models.portfolio import Portfolio, PositionRecord
 from utils.anthropic_client import AnthropicClient, strip_fences
 from utils.journal_manager import JournalManager
 from utils.earnings_calendar import EarningsCalendar
-from core.position_manager import ExitSignal, PositionManager, position_snapshot
+from core.position.manager import ExitSignal, PositionManager, position_snapshot
 
 
 class DecisionEngine:
@@ -284,7 +284,7 @@ Return only valid JSON with this schema (no markdown or extra text):
         trading_cfg = self._settings.get("trading", {}) or {}
         self._edge_threshold = float(trading_cfg.get("edge_score_threshold", 3.0))
         self._max_positions = int(trading_cfg.get("max_positions", 12))
-        self.logger = logging.getLogger("robinhood-agent.core.decision_engine")
+        self.logger = logging.getLogger("robinhood-agent.core.decision.engine")
         # Build the system prompt with the live threshold + position cap interpolated
         _prompt_text = (
             self.SYSTEM_PROMPT_TEXT

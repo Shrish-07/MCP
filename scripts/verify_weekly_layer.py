@@ -45,7 +45,7 @@ async def main() -> int:
              cfg["trading"]["max_positions"])
 
     # --- 1. Trigger weekly selector manually (with stubbed news+model so no API calls) ---
-    from core.weekly_selector import WeeklySelector
+    from core.weekly.selector import WeeklySelector
     import tempfile
 
     selector = WeeklySelector(cfg)
@@ -130,7 +130,7 @@ async def main() -> int:
 
     # --- 7. Live Finnhub fetch (only when key present) ---
     if os.getenv("FINNHUB_API_KEY"):
-        from core.weekly_news import WeeklyNewsFetcher
+        from core.weekly.news import WeeklyNewsFetcher
         fetcher = WeeklyNewsFetcher(lookback_days=7)
         live = await fetcher.fetch_news_for_universe(["AAPL", "MSFT"])
         for sym, items in live.items():
@@ -154,8 +154,8 @@ async def main() -> int:
 
     # --- 9. Secrets check ---
     import re
-    for mod in ("core/sentiment_model.py", "core/weekly_news.py",
-                "core/weekly_selector.py", "core/ticker_selector.py"):
+    for mod in ("core/data/sentiment.py", "core/weekly/news.py",
+                "core/weekly/selector.py", "core/weekly/ticker_selector.py"):
         text = (REPO_ROOT / mod).read_text(encoding="utf-8")
         # Look for hardcoded string literals assigned to sensitive variable names
         for match in re.finditer(

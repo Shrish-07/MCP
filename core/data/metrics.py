@@ -16,7 +16,7 @@ class MetricsEngine:
     computed from OHLCV bars as before."""
 
     def __init__(self) -> None:
-        self.logger = logging.getLogger("robinhood-agent.core.metrics")
+        self.logger = logging.getLogger("robinhood-agent.core.data.metrics")
 
     async def compute(
         self, ticker: str, bars: list[OHLCVBar], client: Any,

@@ -46,8 +46,8 @@ class NewsFetcher:
         settings: dict | None = None,
         max_retries: int = 3,
     ) -> None:
-        self.logger = logging.getLogger("robinhood-agent.core.news_fetch")
-        self._seen_path = Path(__file__).resolve().parent.parent / "data" / "seen_headlines.json"
+        self.logger = logging.getLogger("robinhood-agent.core.data.news")
+        self._seen_path = Path(__file__).resolve().parent.parent.parent / "data" / "seen_headlines.json"
         self._seen_path.parent.mkdir(parents=True, exist_ok=True)
 
         cfg = settings or {}

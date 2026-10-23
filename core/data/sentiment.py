@@ -23,7 +23,7 @@ except ImportError:
     AutoTokenizer = None  # type: ignore[assignment]
     _HAS_ML_DEPS = False
 
-logger = logging.getLogger("robinhood-agent.core.sentiment_model")
+logger = logging.getLogger("robinhood-agent.core.data.sentiment")
 
 PRIMARY_MODEL = "AnkitAI/FinSense-ModernBERT-Financial-News-Sentiment-Analysis"
 FALLBACK_MODEL = "AnkitAI/distilbert-base-uncased-financial-news-sentiment-analysis"

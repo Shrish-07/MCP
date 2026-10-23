@@ -5,7 +5,7 @@ goes through the decision model configured in settings.json).
 
 Public helpers:
   - strip_fences(text): canonical ```json fence remover (single source of
-    truth; core/decision_engine.py and main.py import this).
+    truth; core/decision/engine.py and main.py import this).
 """
 from __future__ import annotations
 

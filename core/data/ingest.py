@@ -14,7 +14,7 @@ class DataIngestLayer:
 
     def __init__(self, client: RobinhoodMCPClient | None = None) -> None:
         self.client = client or RobinhoodMCPClient()
-        self.logger = logging.getLogger("robinhood-agent.core.data_ingest")
+        self.logger = logging.getLogger("robinhood-agent.core.data.ingest")
 
     async def ingest(self, tickers: list[str], existing_tickers: list[str]) -> dict:
         """Fetch portfolio, quotes, and historical bars for the union of watchlist and open positions."""

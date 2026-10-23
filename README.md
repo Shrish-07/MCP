@@ -12,7 +12,7 @@ Key design decisions baked into the code:
 
 - **Anthropic only, single model.** Every model call is `claude-sonnet-5-5` via `utils/anthropic_client.py`. The cheap Haiku tier was removed (it served two disabled features; no code calls it).
 - **MCP-native data.** Market data and broker actions come from Robinhood's official trading MCP server via the `mcp` Python SDK — a direct connection that replaced an earlier, expensive `claude --print` shelling approach. No LLM tokens are spent fetching data.
-- **Deterministic risk guardrails.** Stop-loss, take-profit, max positions, vol-targeted sizing, and liquidity floors are enforced in plain Python (`core/execution.py`, `core/position_manager.py`), never left to the model. There are **no time-window order blocks** — exits can never be deferred, and entries are gated by evidence quality (edge bar), not the clock.
+- **Deterministic risk guardrails.** Stop-loss, take-profit, max positions, vol-targeted sizing, and liquidity floors are enforced in plain Python (`core/execution/engine.py`, `core/position/manager.py`), never left to the model. There are **no time-window order blocks** — exits can never be deferred, and entries are gated by evidence quality (edge bar), not the clock.
 - **DRY_RUN enforced in code, single switch.** The ONLY live/dry toggle is `execution.dry_run` in `config/settings.json`; anything other than an explicit `false` degrades to dry-run (fail-safe). `.env` carries secrets only.
 - **LLM cost: perfect accounting, zero enforcement.** Every call is metered from the API's own `usage` object (append-only record at `logs/cost_records.jsonl`, aggregates in `logs/cost_tracker.json`). The bot never halts or changes behaviour because of spend — the numbers exist to match your Anthropic dashboard exactly.
 - **settings.json is the single source of truth** for every tunable. See also `config/robinhood_mcp_tools.json` — a reference catalog of every Robinhood MCP tool (which are live, which are dormant; nothing reads it at runtime).
@@ -63,8 +63,6 @@ robinhood-agent/
 ├── requirements.txt            # Dependency pin list (note: UTF-16 encoded).
 ├── .env                        # Secrets ONLY (ANTHROPIC_API_KEY, FINNHUB_API_KEY). Not committed.
 ├── .env.example                # Template for the secrets above.
-├── mcp_diagnostic_v2.py        # Standalone read-only OAuth+MCP connectivity probe.
-├── mcp_deep_schema_dump.py     # Enumerates MCP tool schemas once (development aid).
 │
 ├── config/
 │   ├── settings.json             # THE single source of truth for every
@@ -72,15 +70,26 @@ robinhood-agent/
 │   └── robinhood_mcp_tools.json  # Reference catalog of every RH MCP tool.
 │                                 # (docs only — not read at runtime)
 │
-├── core/                       # Business logic layer.
-│   ├── data_ingest.py          # Phase-1 ingestion: portfolio + quotes + historical bars.
-│   ├── metrics.py              # RSI/MACD/BB/ATR/SMA/fundamentals (RH MCP) + local returns/vol.
-│   ├── news_fetch.py           # Finnhub news fetch, dedup, freshness (pure data — no LLM).
-│   ├── decision_engine.py      # LLM prompts + JSON parsing → TradeDecision / ExitDecision.
-│   ├── execution.py            # edge→size ladder, vol-targeted sizing, fail-closed gates.
-│   ├── position_manager.py     # positions.json, reconcile, exit signals, realized P&L,
-│   │                           #   shared per-ticker locks, vol-adjusted stop bands.
-│   └── pnl_tracker.py          # Realized P&L + trade-history report builder.
+├── core/                       # Business logic layer — one package per job.
+│   ├── data/                   # Data pipeline: ingest → metrics → news → sentiment.
+│   │   ├── ingest.py           #   Phase-1 ingestion: portfolio + quotes + historical bars.
+│   │   ├── metrics.py          #   RSI/MACD/BB/ATR/SMA/fundamentals (RH MCP) + local returns/vol.
+│   │   ├── news.py             #   Finnhub news fetch, dedup, freshness (pure data — no LLM).
+│   │   └── sentiment.py        #   ModernBERT sentiment scorer (singleton, lazy, fail-safe).
+│   ├── decision/
+│   │   └── engine.py           # LLM prompts + JSON parsing → TradeDecision / ExitDecision.
+│   ├── execution/
+│   │   └── engine.py           # edge→size ladder, vol-targeted sizing, fail-closed gates.
+│   ├── position/
+│   │   ├── manager.py         # positions.json, reconcile, exit signals, realized P&L,
+│   │   │                      #   shared per-ticker locks, vol-adjusted stop bands.
+│   │   └── pnl_tracker.py     # Realized P&L + trade-history report builder.
+│   ├── weekly/                 # Weekly universe selection pipeline.
+│   │   ├── selector.py        # Sunday-evening orchestrator (feature-flagged).
+│   │   ├── news.py            # Weekly Finnhub news fetch with caching.
+│   │   └── ticker_selector.py # Selection logic with absolute holding protection.
+│   ├── discovery/              # RESERVED: flag-gated discovery funnel (L0–L6). Empty for now.
+│   └── exits/                  # RESERVED: code-owned exit stack (trails/triggers). Empty for now.
 │
 ├── models/                     # Pydantic data contracts (shared across layers).
 │   ├── decisions.py            # DecisionType, CycleType, EdgeScore, TradeDecision,
@@ -90,8 +99,7 @@ robinhood-agent/
 │   └── portfolio.py            # PositionRecord (+reconciled flag), Position, Portfolio.
 │
 ├── robinhood_mcp/
-│   ├── robinhood_client.py                 # Direct MCP client (OAuth) — ACTIVE.
-│   ├── robinhood_client(claude version).py # Older CLI subprocess client — legacy/unused.
+│   ├── robinhood_client.py     # Direct MCP client (OAuth) — ACTIVE.
 │   └── response_recorder.py    # Observability: traces/filters MCP responses.
 │
 ├── utils/
@@ -103,6 +111,24 @@ robinhood-agent/
 │   ├── earnings_calendar.py    # Cached earnings-window lookups (informational only).
 │   ├── journal_manager.py      # Per-ticker rolling journals for model memory.
 │   └── logger.py               # UTC console/file logs + JSON trade log config.
+│
+├── scripts/                    # Development & verification harnesses.
+│   ├── smoke_cycle.py          # One-shot live cycle smoke test (honors dry-run).
+│   └── verify_weekly_layer.py  # Offline-deterministic weekly-layer verification.
+│
+├── tests/                      # Offline test suite (57 tests): config loader, cost tracker,
+│                               #   execution guards, parsing, position logic, rotation,
+│                               #   sentiment, ticker selector, weekly e2e.
+│
+├── archive/                    # Quarantined legacy/one-off artifacts (not on the import path).
+│   ├── robinhood_client(claude version).py  # Older CLI subprocess client — legacy/unused.
+│   ├── mcp_deep_schema_dump.py # One-time MCP tool-schema enumeration (dev aid).
+│   ├── mcp_diagnostic_v2.py    # Standalone OAuth+MCP connectivity probe.
+│   └── smoke_out.txt           # Raw output of the one-shot smoke run.
+│
+├── docs/
+│   └── history/                # Superseded documents (kept for provenance).
+│       └── AUDIT.md            # Pre-overhaul codebase audit (HISTORICAL).
 │
 ├── data/
 │   ├── earnings_calendar.json  # Cached upcoming RH earnings.
@@ -243,7 +269,7 @@ The trade must clear `trading.edge_score_threshold` (3.0) to open a position.
 
 Risk is enforced deterministically in code, independent of the model's judgment:
 
-### Position management (`core/position_manager.py`, `logs/positions.json`)
+### Position management (`core/position/manager.py`, `logs/positions.json`)
 
 - **Position records**: each opened position stores `entry_price`, `entry_date`, `entry_edge_score`, `stop_loss_pct` (default `-0.07`), `take_profit_pct` (default `0.20`), `quantity`, `order_id`.
 - **Reconciliation** (`reconcile_with_mcp`): synchronises local `positions.json` with live MCP holdings. **Safety rule:** if the MCP portfolio pull is empty/None, local records are left untouched (a failed/empty pull must never wipe records). Records are only removed when the live response is non-empty and the ticker is genuinely absent (or qty ≤ 0). Quantity mismatches are adjusted to live values.
@@ -445,8 +471,8 @@ dry-run ON. Key sections:
 Set `sentiment_selection.enabled: true` in `config/settings.json` to let a
 weekly scheduled job (Sunday evening ET) re-rank the trading universe using
 Finnhub headlines scored by a ModernBERT financial sentiment model
-(`core/weekly_selector.py`, `core/weekly_news.py`, `core/sentiment_model.py`,
-`core/ticker_selector.py`). When the flag is off, the agent keeps using
+(`core/weekly/selector.py`, `core/weekly/news.py`, `core/data/sentiment.py`,
+`core/weekly/ticker_selector.py`). When the flag is off, the agent keeps using
 `watchlist.default_tickers` and no weekly job is registered.
 
 Guarantees: currently held tickers are NEVER dropped (even when holdings

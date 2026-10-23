@@ -32,7 +32,7 @@ from models.decisions import (
     TradeDecision,
 )
 from models.portfolio import Portfolio, PositionRecord
-from core.position_manager import PositionManager
+from core.position.manager import PositionManager
 
 
 def _table(raw) -> list[list[float]]:

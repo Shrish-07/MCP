@@ -17,7 +17,7 @@ class DecisionType(str, Enum):
 SUCCESS_STATUSES = ("EXECUTED", "SUBMITTED", "WOULD_EXECUTE")
 
 # Canonical exit-review rubric — single definition, shared by
-# core/decision_engine.py (cycles) and main.py (monitor path).
+# core/decision/engine.py (cycles) and main.py (monitor path).
 EXIT_REVIEW_RULES = (
     "EXIT REVIEW RULES:\n"
     "- You MUST state entry vs current and unrealized % in reasoning.\n"
