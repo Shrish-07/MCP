@@ -1,5 +1,10 @@
 # CODEBASE AUDIT - Robinhood MCP Trading Bot
 
+> **HISTORICAL DOCUMENT.** This audit describes the codebase as of the pre-overhaul
+> state (before the execution-safety / ROTATE / config overhaul). Many statements
+> below (cost ceilings, hard-coded limits, env-based DRY_RUN, Haiku features)
+> are intentionally superseded by the current code and `config/settings.json`.
+
 ## 1. Fixed Ticker List Location
 - **File**: `config/settings.json`
 - **Key**: `watchlist.default_tickers` (array of 10 tickers: JPM, NVDA, AVGO, CAT, MU, TSM, UNH, XOM, AMD, COST)

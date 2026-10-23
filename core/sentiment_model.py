@@ -1,4 +1,10 @@
-"""Financial news sentiment analysis using ModernBERT-based models."""
+"""Financial news sentiment analysis using ModernBERT-based models.
+
+ML dependencies (torch / transformers) are OPTIONAL at import time: the
+trading agent and every other module must keep working on an environment
+without the multi-GB ML stack. The imports are wrapped so only actually
+LOADING the sentiment model fails (with a clear, actionable error).
+"""
 
 from __future__ import annotations
 
@@ -7,8 +13,15 @@ import threading
 from functools import lru_cache
 from typing import List, Optional
 
-import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+try:
+    import torch
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+    _HAS_ML_DEPS = True
+except ImportError:
+    torch = None  # type: ignore[assignment]
+    AutoModelForSequenceClassification = None  # type: ignore[assignment]
+    AutoTokenizer = None  # type: ignore[assignment]
+    _HAS_ML_DEPS = False
 
 logger = logging.getLogger("robinhood-agent.core.sentiment_model")
 
@@ -44,6 +57,13 @@ class SentimentModel:
 
     def _load_model(self) -> None:
         """Load the sentiment model with fallback support."""
+        if not _HAS_ML_DEPS:
+            raise RuntimeError(
+                "ML dependencies not installed (torch/transformers). "
+                "Run: pip install torch transformers accelerate safetensors. "
+                "The trading agent runs fine without them — only the weekly "
+                "sentiment ticker selection needs this stack."
+            )
         # Determine device
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -80,18 +100,45 @@ class SentimentModel:
                 continue
 
         raise RuntimeError("Failed to load any sentiment model (tried primary and fallback)")
+    def _resolve_label_indices(self) -> tuple[int, int, int]:
+        """Resolve (negative_idx, neutral_idx, positive_idx) from the loaded
+        model's actual label mapping — keyword scan, never blind defaults.
+
+        Hard-fails (raises) if any class cannot be resolved, because silently
+        defaulting to 0/1/2 would invert the sign of every sentiment score
+        for a model with a different label ordering.
+        """
+        resolved = {}
+        for label, idx in (self.label2id or {}).items():
+            low = str(label).lower()
+            if "pos" in low:
+                resolved["positive"] = idx
+            elif "neg" in low:
+                resolved["negative"] = idx
+            elif "neu" in low:
+                resolved["neutral"] = idx
+        missing = {"negative", "neutral", "positive"} - set(resolved)
+        if missing:
+            raise RuntimeError(
+                f"sentiment label mapping ambiguous for {self.model_name}: "
+                f"label2id={self.label2id}, could not resolve {sorted(missing)}. "
+                f"Refusing to guess (a wrong guess silently inverts all scores)."
+            )
+        logger.info("sentiment_labels_resolved %s -> %s", self.model_name, resolved)
+        return resolved["negative"], resolved["neutral"], resolved["positive"]
+
     def _get_sentiment_score(self, logits: torch.Tensor) -> float:
         """Convert model logits to continuous sentiment score in [-1, +1]."""
         probs = torch.softmax(logits, dim=-1).squeeze().cpu().numpy()
 
-        # Map labels to sentiment values
-        # Typical financial sentiment: negative=0, neutral=1, positive=2
+        # Map labels to sentiment values — resolved from the model's own
+        # config (keyword-scanned at load time; hard-fails if ambiguous).
         # Score = P(positive) - P(negative)  -> range [-1, +1]
         # Neutral is ignored in the score but contributes to confidence
 
-        negative_idx = self.label2id.get("negative", self.label2id.get("NEGATIVE", 0))
-        positive_idx = self.label2id.get("positive", self.label2id.get("POSITIVE", 2))
-        neutral_idx = self.label2id.get("neutral", self.label2id.get("NEUTRAL", 1))
+        if not hasattr(self, "_label_idx"):
+            self._label_idx = self._resolve_label_indices()
+        negative_idx, _neutral_idx, positive_idx = self._label_idx
 
         p_neg = float(probs[negative_idx]) if negative_idx < len(probs) else 0.0
         p_pos = float(probs[positive_idx]) if positive_idx < len(probs) else 0.0

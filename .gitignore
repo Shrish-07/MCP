@@ -4,6 +4,8 @@ __pycache__/
 *.pyc
 logs/*.log
 logs/*.json
+logs/*.jsonl
+logs/*.gz
 .rh_oauth_cache.json
 
 # Weekly sentiment selection: runtime state (regenerated each run)

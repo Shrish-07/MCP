@@ -167,9 +167,12 @@ class RobinhoodMCPClient:
     cached and refreshed automatically across runs.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, url: str | None = None) -> None:
         self.logger = logging.getLogger("robinhood-agent.mcp")
         self.max_retries = 3
+        # Server URL now comes from config/settings.json → execution.mcp_url;
+        # the built-in constant remains the default if callers pass nothing.
+        self.url = (url or ROBINHOOD_MCP_URL).strip() or ROBINHOOD_MCP_URL
         self._cached_account_number: str = ""
         self._token_cache: dict[str, Any] = {}
         self._token_lock = asyncio.Lock()
@@ -382,7 +385,7 @@ class RobinhoodMCPClient:
                 access_token = await self._ensure_valid_token()
                 headers = {"Authorization": f"Bearer {access_token}"}
 
-                async with streamablehttp_client(ROBINHOOD_MCP_URL, headers=headers, timeout=30) as (read, write, _sid):
+                async with streamablehttp_client(self.url, headers=headers, timeout=30) as (read, write, _sid):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         result = await session.call_tool(tool_name, arguments)

@@ -46,7 +46,16 @@ async def main() -> int:
 
     # --- 1. Trigger weekly selector manually (with stubbed news+model so no API calls) ---
     from core.weekly_selector import WeeklySelector
+    import tempfile
+
     selector = WeeklySelector(cfg)
+    # NEVER write to the real data/ directory — the verify run must not
+    # poison the live agent's selected universe (data/selected_universe.json).
+    sandbox = Path(tempfile.mkdtemp(prefix="verify_weekly_"))
+    selector.data_dir = sandbox
+    selector.selected_universe_path = sandbox / "selected_universe.json"
+    selector.candidate_universe_path = sandbox / "candidate_universe.json"
+    log.info("sandboxed selector data dir -> %s", sandbox)
     log.info("selector created: enabled=%s universe_size=%d", selector.enabled, selector.universe_size)
 
     # Stub news fetcher and scoring so verification is deterministic offline.

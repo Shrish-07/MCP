@@ -1,17 +1,82 @@
 {
   "models": {
-    "decision": "claude-sonnet-5",
-    "cheap": "claude-haiku-4-5"
+    "decision": "claude-sonnet-5-5",
+    "max_tokens": 4096,
+    "send_temperature": false
+  },
+  "execution": {
+    "dry_run": true,
+    "mcp_url": "https://agent.robinhood.com/mcp/trading",
+    "tradability_fail_mode": "closed",
+    "min_dollar_volume": 75000000
   },
   "trading": {
     "max_positions": 12,
     "max_position_pct": 0.08,
     "edge_score_threshold": 3.0,
-    "stop_loss_pct": -0.07,
+    "take_profit_pct": 0.2,
     "profit_review_pct": 0.15,
     "max_holding_days": 15,
-    "portfolio_size": 2000,
-    "dry_run": false
+    "cycle_edge_bonus": {
+      "OPEN": 0.0,
+      "MID": 0.25,
+      "CLOSE": 0.5
+    },
+    "stop_loss_bands": [
+      [
+        0,
+        -0.07
+      ],
+      [
+        30,
+        -0.1
+      ],
+      [
+        60,
+        -0.13
+      ],
+      [
+        90,
+        -0.16
+      ]
+    ],
+    "size_ladder": [
+      [
+        3.0,
+        0.03
+      ],
+      [
+        3.5,
+        0.04
+      ],
+      [
+        4.0,
+        0.06
+      ],
+      [
+        4.5,
+        0.08
+      ]
+    ],
+    "vol_sizing": [
+      [
+        30,
+        0.8
+      ],
+      [
+        60,
+        0.6
+      ],
+      [
+        90,
+        0.45
+      ]
+    ],
+    "extreme_vol_reject_30d": 120.0,
+    "market_hours": {
+      "calendar": "NYSE",
+      "stale_data_guard": true
+    }
   },
   "schedule": {
     "open_hour": 9,
@@ -21,6 +86,14 @@
     "close_hour": 15,
     "close_minute": 30,
     "timezone": "America/New_York"
+  },
+  "monitor": {
+    "enabled": true,
+    "historicals_span": "3month",
+    "interval_seconds": 15,
+    "profit_review_cooldown_min": 15,
+    "profit_target_cooldown_min": 5,
+    "check_max_holding": true
   },
   "watchlist": {
     "default_tickers": [
@@ -37,10 +110,6 @@
     ],
     "robinhood_watchlist_name": "Default"
   },
-  "cost_limits": {
-    "daily_usd_limit": 3.00,
-    "monthly_usd_limit": 50.00
-  },
   "news": {
     "provider": "finnhub",
     "lookback_days": 3,
@@ -50,15 +119,23 @@
       "enabled": true,
       "category": "general",
       "count": 8
-    },
-    "haiku_summary": {
-      "enabled": false,
-      "fetch_cap": 20,
-      "max_summary_sentences": 5
-    },
-    "haiku_fallback": {
-      "enabled": false,
-      "trigger_when_no_news": true
+    }
+  },
+  "cost_tracking": {
+    "enabled": true,
+    "pricing": {
+      "claude-sonnet-5-5": {
+        "input": 3.0,
+        "cache_write": 3.75,
+        "cache_read": 0.3,
+        "output": 15.0
+      },
+      "*": {
+        "input": 3.0,
+        "cache_write": 3.75,
+        "cache_read": 0.3,
+        "output": 15.0
+      }
     }
   },
   "sentiment_selection": {
@@ -74,5 +151,10 @@
     "fallback_model": "AnkitAI/distilbert-base-uncased-financial-news-sentiment-analysis",
     "batch_size": 16,
     "cache_max_age_hours": 24
+  },
+  "reporting": {
+    "attribution_enabled": true,
+    "attribution_hour": 16,
+    "attribution_minute": 5
   }
 }

@@ -108,6 +108,8 @@ class MetricsEngine:
             output="latest", period=20,
         )
         sma_20 = self._extract_latest_indicator_value(sma_result, "sma")
+        metrics.sma_20 = sma_20  # raw value — main.py no longer has to
+        #                         # reconstruct it from the percentage
         metrics.distance_from_20dma = (
             ((metrics.current_price - sma_20) / sma_20) * 100.0 if sma_20 else 0.0
         )

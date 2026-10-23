@@ -38,7 +38,7 @@ class WeeklySelector:
         self.selected_universe_path = self.data_dir / "selected_universe.json"
         self.candidate_universe_path = self.data_dir / "candidate_universe.json"
 
-        self.position_manager = PositionManager()
+        self.position_manager = PositionManager(config=config)
         self.news_fetcher = WeeklyNewsFetcher(lookback_days=self.lookback_days)
         self.sentiment_model = None  # Lazy load
 
@@ -50,8 +50,14 @@ class WeeklySelector:
         self.logger.info("weekly_selector_initializing")
         self.candidate_universe = await self._load_candidate_universe()
         self.selected_universe = await self._load_selected_universe()
-        # Lazy-load the sentiment model once
-        self.sentiment_model = get_sentiment_model()
+        # Lazy-load the sentiment model once. Without the ML stack the model
+        # stays None and run_selection degrades safely (keeps the previous
+        # universe) instead of crashing the whole agent.
+        try:
+            self.sentiment_model = get_sentiment_model()
+        except Exception as exc:
+            self.logger.warning("sentiment_model_unavailable (%s) — weekly selection will keep previous universe", exc)
+            self.sentiment_model = None
         self.logger.info(
             "weekly_selector_initialized candidates=%d previous_selection=%d",
             len(self.candidate_universe), len(self.selected_universe),

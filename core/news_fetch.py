@@ -1,15 +1,15 @@
 """Fetch news from Finnhub REST API with structured models and id-based
 deduplication across cycles.
 
-Replaces the prior Yahoo/WSJ RSS + Haiku-fabrication pipeline.
+Pure data pipeline — NO LLM anywhere in this module (the old optional
+Haiku summarizer/fallback was removed; neither feature was enabled).
 
 Features:
 - Finnhub company-news + general market news
-- ID-based deduplication (cycles only show articles once per day)
+- ID-based deduplication (cycles only show articles once per calendar day)
 - Freshness window filter + per-ticker cap
-- Optional Haiku fallback for tickers with zero news
-- Optional Haiku summarizer that condenses N articles per ticker into a
-  single digest (separate cheap LLM call via Anthropic Haiku)
+- Shared sliding-window rate limiter (55 calls/min, under Finnhub's 60)
+- Retries with exponential backoff + jitter on HTTP/transient failures
 """
 
 from __future__ import annotations
@@ -18,13 +18,14 @@ import asyncio
 import json
 import logging
 import os
-from datetime import UTC, date, datetime, timedelta, timezone
+import random
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import httpx
 
 from models.news import NewsItem
-from utils.anthropic_client import AnthropicClient
+from utils.rate_limit import RateLimiter
 
 _FINNHUB_COMPANY_NEWS = "https://finnhub.io/api/v1/company-news"
 _FINNHUB_GENERAL_NEWS = "https://finnhub.io/api/v1/news"
@@ -37,18 +38,14 @@ class NewsFetcher:
     uses Finnhub's ``id`` field, persisted to ``data/seen_headlines.json``
     so MID and CLOSE cycles don't re-surface the same articles within
     the same calendar day.
-
-    Optional Haiku-fallback is only invoked when a ticker receives zero
-    items **and** the config flag ``haiku_fallback.enabled`` is True.
     """
 
     def __init__(
         self,
-        anthropic_client: AnthropicClient | None = None,
         finnhub_api_key: str = "",
         settings: dict | None = None,
+        max_retries: int = 3,
     ) -> None:
-        self.client = anthropic_client
         self.logger = logging.getLogger("robinhood-agent.core.news_fetch")
         self._seen_path = Path(__file__).resolve().parent.parent / "data" / "seen_headlines.json"
         self._seen_path.parent.mkdir(parents=True, exist_ok=True)
@@ -62,11 +59,8 @@ class NewsFetcher:
         self._gm_enabled: bool = bool(gm.get("enabled", True))
         self._gm_category: str = str(gm.get("category", "general"))
         self._gm_count: int = int(gm.get("count", 8))
-        hb = cfg.get("haiku_fallback", {})
-        self._haiku_fallback_enabled: bool = bool(hb.get("enabled", False))
-        hs = cfg.get("haiku_summary", {})
-        self._haiku_summary_enabled: bool = bool(hs.get("enabled", False))
-        self._haiku_summary_concurrent: int = min(int(hs.get("default_concurrent", 10)), 20)
+        self._max_retries = max_retries
+        self._rate_limiter = RateLimiter(max_calls_per_minute=55)  # under Finnhub's 60/min
 
     # ------------------------------------------------------------------
     # Public API — same signature shape as before  (dict[str, …])
@@ -81,349 +75,170 @@ class NewsFetcher:
         * Fetches company-news for each ticker concurrently.
         * Optionally fetches general-market news and attaches it to
           ``"MARKET"`` and merges into ``"SPY"``.
-        * Applies 24‑h freshness filter and ``max_per_ticker`` cap.
+        * Applies the freshness filter and ``max_per_ticker`` cap.
         """
-        tickers = list(dict.fromkeys(tickers))  # de-dupe, preserve order
-        results: dict[str, list[NewsItem]] = {ticker: [] for ticker in tickers}
+        day_key = date.today().isoformat()
 
-        today = date.today()
-        today_iso = today.isoformat()
+        seen_raw = self._read_seen_store()
+        if seen_raw.get("_date") != day_key:
+            existing_ids: list[int] = []
+        else:
+            existing_ids = list(seen_raw.get("ids", []))
 
-        # ── load / initialise dedup state ──────────────────────────
-        try:
-            raw = self._seen_path.read_text(encoding="utf-8") if self._seen_path.exists() else ""
-            cache = json.loads(raw) if raw else {"date": today_iso, "seen": []}
-        except Exception:
-            cache = {"date": today_iso, "seen": []}
+        # Full seen-set — previously this silently sliced to [118:], which
+        # re-admitted old headlines whenever fewer than 119 ids were stored.
+        seen_ids: set[int] = set(existing_ids)
 
-        if cache.get("date") != today_iso:
-            cache = {"date": today_iso, "seen": []}
+        result: dict[str, list[NewsItem]] = {}
+        if not self._api_key:
+            self.logger.warning("finnhub no API key — news fetch skipped")
+            return {t: [] for t in tickers}
 
-        seen_ids: set[int] = set(cache.get("seen", []))
-        new_ids: set[int] = set()
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            sem = asyncio.Semaphore(10)
 
-        # ── time boundaries for fresh-window filter ────────────────
-        now_epoch = int(datetime.now(timezone.utc).timestamp())
-        cutoff_epoch = now_epoch - (self._fresh_window_hours * 3600)
-
-        # ── concurrent company-news for every ticker ───────────────
-        from_str = (today - timedelta(days=self._lookback_days)).isoformat()
-        to_str = today.isoformat()
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            # Limit concurrent Finnhub requests (free-tier rate limits)
-            sem = asyncio.Semaphore(3)
-
-            async def _bounded_company_news(ticker: str):
+            async def _per_ticker(sym: str) -> tuple[str, list[NewsItem]]:
                 async with sem:
-                    return await self._fetch_company_news(client, ticker, from_str, to_str)
+                    raw = await self._fetch_company_news(http, sym)
+                    items = self._parse_items(raw, sym)
+                    return sym, items
 
-            co_tasks = [
-                _bounded_company_news(ticker)
-                for ticker in tickers
-            ]
-
-            gm_task: asyncio.Task | None = None
-            if self._gm_enabled:
-                gm_task = asyncio.create_task(
-                    self._fetch_general_news(client)
-                )
-
-            co_results = await asyncio.gather(*co_tasks, return_exceptions=True)
-
-            for ticker, co_result in zip(tickers, co_results):
-                if isinstance(co_result, Exception):
-                    self.logger.warning(
-                        "company_news_failed ticker=%s error=%r type=%s",
-                        ticker, co_result, type(co_result).__name__
-                    )
-                    continue
-                articles: list[NewsItem] = co_result  # type: ignore[assignment]
-                filtered = self._filter_fresh(articles, seen_ids, new_ids, cutoff_epoch)
-                results[ticker] = filtered
-
-            # ── general-market news ─────────────────────────────────
-            if self._gm_enabled and gm_task is not None:
+            tasks = [_per_ticker(t) for t in tickers]
+            for task in asyncio.as_completed(tasks):
                 try:
-                    gm_articles = await gm_task
+                    sym, items = await task
                 except Exception as exc:
-                    self.logger.warning(
-                        "general_news_failed: %r type=%s", exc, type(exc).__name__
-                    )
-                    gm_articles = []
+                    self.logger.warning("news_fetch_failed task error=%s", exc)
+                    continue
+                result[sym] = items
 
-                gm_filtered = self._filter_fresh(
-                    gm_articles, seen_ids, new_ids, cutoff_epoch, cap=self._gm_count
-                )
-                if gm_filtered:
-                    results["MARKET"] = gm_filtered
-                    # merge into SPY so the SPY context includes broad market news
-                    current_spy = results.get("SPY", [])
-                    current_spy = (current_spy + gm_filtered)[: self._max_per_ticker]
-                    results["SPY"] = current_spy
+            gm_items: list[NewsItem] = []
+            if self._gm_enabled:
+                gm_raw = await self._fetch_general_news(http)
+                gm_items = self._parse_items(gm_raw, "MARKET")
 
-            # ── optional Haiku fallback (off by default) ───────────
-            if self._haiku_fallback_enabled and self.client is not None:
-                empty_tickers = [t for t in tickers if len(results[t]) == 0]
-                if empty_tickers:
-                    fb_tasks = [
-                        self._generate_fallback_summary(ticker, cycle_type)
-                        for ticker in empty_tickers
-                    ]
-                    fb_results = await asyncio.gather(*fb_tasks, return_exceptions=True)
-                    for ticker, fb_result in zip(empty_tickers, fb_results):
-                        if isinstance(fb_result, Exception):
-                            self.logger.warning(
-                                "haiku_fallback_failed ticker=%s error=%s", ticker, fb_result
-                            )
-                            continue
-                        if fb_result:
-                            results[ticker] = fb_result  # type: ignore[list-item]
+        new_ids: set[int] = set()
+        for sym, items in result.items():
+            fresh: list[NewsItem] = []
+            for it in items:
+                if it.id in seen_ids:
+                    continue
+                age_h = (datetime.now(UTC) - datetime.fromtimestamp(it.datetime, tz=UTC)).total_seconds() / 3600.0
+                if age_h > self._fresh_window_hours:
+                    continue
+                fresh.append(it)
+                new_ids.add(it.id)
+            result[sym] = fresh[: self._max_per_ticker]
 
-            # ── optional Haiku summarizer — one summary per ticker from all its news ──
-            if self._haiku_summary_enabled and self.client is not None:
-                summary_tickers = [
-                    t for t in tickers if len(results.get(t, [])) > 0
-                ]
-                if summary_tickers:
-                    # batch to respect default_concurrent limit
-                    sem = asyncio.Semaphore(self._haiku_summary_concurrent)
-                    async def _summarize(ticker: str) -> list[NewsItem]:
-                        async with sem:
-                            return await self._generate_ticker_summary(
-                                ticker, results.get(ticker, [])
-                            )
-                    hs_tasks = [_summarize(t) for t in summary_tickers]
-                    hs_results = await asyncio.gather(*hs_tasks, return_exceptions=True)
-                    for ticker, hs_result in zip(summary_tickers, hs_results):
-                        if isinstance(hs_result, Exception):
-                            self.logger.warning(
-                                "haiku_summary_failed ticker=%s error=%s", ticker, hs_result
-                            )
-                            continue
-                        if hs_result:
-                            # Append the AI summary as a marked entry alongside
-                            # the raw articles — downstream renderer picks it up.
-                            results[ticker] = hs_result + results[ticker]
+        if gm_items:
+            fresh_gm: list[NewsItem] = []
+            for it in gm_items:
+                if it.id in seen_ids:
+                    continue
+                age_h = (datetime.now(UTC) - datetime.fromtimestamp(it.datetime, tz=UTC)).total_seconds() / 3600.0
+                if age_h > self._fresh_window_hours:
+                    continue
+                fresh_gm.append(it)
+                new_ids.add(it.id)
+            fresh_gm = fresh_gm[: self._gm_count]
+            if fresh_gm:
+                result["MARKET"] = fresh_gm
+                if "SPY" in result:
+                    result["SPY"] = (result["SPY"] + fresh_gm)[: self._max_per_ticker]
 
-            # ── persist updated seen-set ───────────────────────────
+        # No-news tickers simply map to [] (the removed Haiku fallback used
+        # to fabricate a sentence here — real data or silence now).
+        for t in tickers:
+            if result.get(t) is None:
+                result[t] = []
+
+        self._persist_seen(day_key, existing_ids, new_ids)
+        return result
+
+    # ------------------------------------------------------------------
+    # Seen-store persistence
+    # ------------------------------------------------------------------
+
+    def _read_seen_store(self) -> dict:
+        if not self._seen_path.exists():
+            return {}
+        try:
+            return json.loads(self._seen_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _persist_seen(self, day_key: str, existing_ids: list[int], new_ids: set[int]) -> None:
+        """Write today's merged id list (rolling prune to last ~400)."""
+        try:
+            merged = list(dict.fromkeys(existing_ids + sorted(new_ids)))[-400:]
+            self._seen_path.write_text(
+                json.dumps({"_date": day_key, "ids": merged}, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            self.logger.warning("seen_headlines_persist_failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Finnhub fetchers (rate-limited + retried)
+    # ------------------------------------------------------------------
+
+    async def _fetch_with_retry(self, http: httpx.AsyncClient, endpoint: str,
+                                params: dict, label: str) -> list:
+        """GET one Finnhub endpoint with the shared rate limiter and
+        exponential-backoff retries. Failures degrade to []."""
+        params = {**params, "token": self._api_key}
+        for attempt in range(self.max_retries):
+            await self._rate_limiter.acquire()
             try:
-                all_seen = sorted(seen_ids | new_ids)
-                self._seen_path.write_text(
-                    json.dumps({"date": today_iso, "seen": all_seen}, indent=2),
-                    encoding="utf-8",
-                )
+                r = await http.get(endpoint, params=params)
+                r.raise_for_status()
+                data = r.json()
+                return data if isinstance(data, list) else []
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if 400 <= status < 500 and status != 429:
+                    # Client error (bad key, bad params) — retrying won't help.
+                    self.logger.warning("finnhub_client_error %s status=%s label=%s", endpoint, status, label)
+                    return []
+                self.logger.warning("finnhub_http_retryable label=%s status=%s attempt=%d",
+                                    label, status, attempt + 1)
+                await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
             except Exception as exc:
-                self.logger.warning("seen_cache_write_failed: %s", exc)
+                self.logger.warning("finnhub_error label=%s attempt=%d error=%s", label, attempt + 1, exc)
+                await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
+        self.logger.error("finnhub_failed label=%s after %d attempts", label, self.max_retries)
+        return []
 
-            return results
-
-    # ------------------------------------------------------------------
-    # Internal fetch helpers
-    # ------------------------------------------------------------------
-
-    async def _fetch_company_news(
-        self, client: httpx.AsyncClient, ticker: str, from_date: str, to_date: str
-    ) -> list[NewsItem]:
+    async def _fetch_company_news(self, http: httpx.AsyncClient, symbol: str) -> list:
         params = {
-            "symbol": ticker,
-            "from": from_date,
-            "to": to_date,
-            "token": self._api_key,
+            "symbol": symbol,
+            "from": (date.today() - timedelta(days=self._lookback_days)).isoformat(),
+            "to": date.today().isoformat(),
         }
-        response = await client.get(_FINNHUB_COMPANY_NEWS, params=params)
-        if response.status_code != 200:
-            self.logger.warning(
-                "finnhub_http_error endpoint=company-news symbol=%s status=%s body=%s",
-                ticker, response.status_code, response.text[:300]
-            )
-        response.raise_for_status()
-        raw_list = response.json()
-        return self._parse_articles(raw_list, related=ticker)
+        return await self._fetch_with_retry(http, _FINNHUB_COMPANY_NEWS, params, symbol)
 
-    async def _fetch_general_news(self, client: httpx.AsyncClient) -> list[NewsItem]:
-        params = {
-            "category": self._gm_category,
-            "token": self._api_key,
-        }
-        response = await client.get(_FINNHUB_GENERAL_NEWS, params=params)
-        if response.status_code != 200:
-            self.logger.warning(
-                "finnhub_http_error endpoint=general-news status=%s body=%s",
-                response.status_code, response.text[:300]
-            )
-        response.raise_for_status()
-        raw_list = response.json()
-        return self._parse_articles(raw_list)
-
-    # ------------------------------------------------------------------
-    # Parse & filter
-    # ------------------------------------------------------------------
+    async def _fetch_general_news(self, http: httpx.AsyncClient) -> list:
+        params = {"category": self._gm_category}
+        return await self._fetch_with_retry(http, _FINNHUB_GENERAL_NEWS, params, "general_market")
 
     @staticmethod
-    def _parse_articles(
-        raw: list[dict], related: str = ""
-    ) -> list[NewsItem]:
-        articles: list[NewsItem] = []
-        for obj in raw or []:
+    def _parse_items(raw: list, related: str) -> list[NewsItem]:
+        items: list[NewsItem] = []
+        for art in raw:
             try:
-                item = NewsItem(
-                    id=int(obj.get("id", 0)),
-                    headline=str(obj.get("headline", "")).strip(),
-                    summary=(
-                        str(obj["summary"]).strip()
-                        if obj.get("summary") is not None
-                        else None
-                    ),
-                    source=str(obj.get("source", "")),
-                    url=obj.get("url"),
-                    image=obj.get("image"),
-                    related=str(obj.get("related", related)) or related,
-                    category=str(obj.get("category", "")),
-                    datetime=int(obj.get("datetime", 0)),
+                items.append(
+                    NewsItem(
+                        id=int(art.get("id", 0)),
+                        headline=str(art.get("headline", "")),
+                        summary=art.get("summary"),
+                        source=str(art.get("source", "")),
+                        url=art.get("url"),
+                        image=art.get("image"),
+                        related=str(art.get("related", related or "")),
+                        category=str(art.get("category", "")),
+                        datetime=int(art.get("datetime", 0)),
+                    )
                 )
-                if item.headline:
-                    articles.append(item)
-            except Exception as exc:
-                logging.getLogger("robinhood-agent.core.news_fetch").debug(
-                    "skip_malformed_article raw=%s error=%s",
-                    obj.get("id", "<no-id>"),
-                    exc,
-                )
-        return articles
-
-    def _filter_fresh(
-        self,
-        articles: list[NewsItem],
-        seen_ids: set[int],
-        new_ids: set[int] | None = None,
-        cutoff_epoch: int = 0,
-        cap: int | None = None,
-    ) -> list[NewsItem]:
-        cap = cap if cap is not None else self._max_per_ticker
-        fresh: list[NewsItem] = []
-        for item in articles:
-            if item.id in seen_ids:
+            except Exception:
                 continue
-            if cutoff_epoch > 0 and item.datetime < cutoff_epoch:
-                continue
-            fresh.append(item)
-            if new_ids is not None:
-                new_ids.add(item.id)
-        # Most-recent-first before capping (Finnhub already returns
-        # roughly desc by datetime, but enforce explicitly for safety).
-        fresh.sort(key=lambda x: x.datetime, reverse=True)
-        return fresh[:cap]
-
-    # ------------------------------------------------------------------
-    # Haiku helpers — fallback (disabled by default) and summarizer
-    # ------------------------------------------------------------------
-
-    async def _generate_ticker_summary(
-        self, ticker: str, articles: list[NewsItem]
-    ) -> list[NewsItem]:
-        """Summarize all articles for `ticker` into one concise digest entry.
-
-        Returns a list with a synthetic "summary" ``NewsItem``, always
-        exactly one entry. Does not modify original articles.
-        """
-        if not self.client or not articles:
-            return []
-        headlines = "\n".join(
-            f"- [{n.source}] {n.headline}" for n in articles
-        )
-        # merge sources into a short set for labelling
-        sources = ", ".join(
-            sorted({n.source for n in articles if n.source} or ["market"])
-        )
-        system = [
-            {
-                "type": "text",
-                "text": (
-                    "You synthesise financial news for a systematic trading agent. "
-                    "You receive a list of recent headlines for one ticker. "
-                    "Summarise them into 1-3 short bullet points, focusing on impact "
-                    "to fundamentals, sentiment, or price action. "
-                    "Do NOT invent prices, earnings numbers, or trade recommendations. "
-                    "Use plain language with no markdown except * around ticker names."
-                ),
-                "cache_control": {"type": "ephemeral"},
-            }
-        ]
-        user_text = f"Ticker: {ticker}. Headlines:\n{headlines}"
-        try:
-            digest = await self.client.complete(system, user_text)
-        except Exception:
-            return []  # summarization is best-effort; skip on error
-
-        lines = [l.strip(" -•") for l in digest.splitlines() if l.strip()]
-        if not lines:
-            return []
-        return [
-            NewsItem(
-                id=abs(hash(f"{ticker}_summary_{lines[0]}")),
-                headline="; ".join(lines),
-                source=f"Haiku summary ({sources})" if sources else "Haiku summary",
-                summary=None,
-                related=ticker,
-                category="llm_summary",
-                datetime=int(datetime.now(UTC).timestamp()),
-            )
-        ]
-
-    async def _generate_fallback_summary(
-        self, ticker: str, cycle_type: str
-    ) -> list[NewsItem] | None:
-        """Generate ONE summary headline when no live news was found.
-
-        This path is only entered when ``haiku_fallback.enabled`` is True
-        in settings and is meant as a safety net, not a replacement for
-        real news.  The output is clearly labelled ``source``.
-        """
-        if not self.client:
-            return None
-        try:
-            system = [
-                {
-                    "type": "text",
-                    "text": (
-                        "You are the fallback responder in a financial news pipeline. "
-                        "You are given a ticker for which the live news API returned zero "
-                        "results. Based on the latest facts you know about this company, "
-                        "write ONE very brief factual statement (1-2 sentences) of what is "
-                        "currently relevant. Do not speculate, do not invent prices, do not "
-                        "use markdown. If you are unsure, respond with 'No additional context "
-                        "available for this ticker.'"
-                    ),
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
-            user = (
-                f"Ticker: {ticker}. Cycle: {cycle_type}. "
-                f"Date: {date.today().isoformat()}. One key fact:"
-            )
-            text = await self.client.complete(system, user)
-            lines = [
-                line.strip(" -•")
-                for line in text.splitlines()
-                if line.strip()
-            ]
-            if not lines:
-                return None
-            # return as a single synthetic NewsItem for uniform rendering
-            return [
-                NewsItem(
-                    id=abs(hash(f"{ticker}_{lines[0]}")),
-                    headline=lines[0],
-                    source="Haiku fallback summary",
-                    summary=None,
-                    related=ticker,
-                    category="fallback",
-                    datetime=int(datetime.now(UTC).timestamp()),
-                )
-            ]
-        except Exception as exc:
-            self.logger.warning(
-                "haiku_fallback_failed ticker=%s error=%s", ticker, exc
-            )
-            return None
+        return items
