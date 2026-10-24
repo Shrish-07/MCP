@@ -1,3 +1,8 @@
+# Core runtime dependencies for robinhood-agent.
+#
+# Optional extras (install only what you need):
+#   pip install -r requirements-ml.txt   # torch/transformers — only when sentiment_selection.enabled=true
+#   pip install -r requirements-dev.txt  # pytest / pytest-asyncio / ruff — test + lint tooling
 annotated-types==0.7.0
 anthropic==0.113.0
 anyio==4.14.1
@@ -5,40 +10,63 @@ APScheduler==3.11.3
 attrs==26.1.0
 certifi==2026.6.17
 cffi==2.1.0
+charset-normalizer==3.4.9
 click==8.4.2
 colorama==0.4.6
 cryptography==49.0.0
 distro==1.9.0
 docstring_parser==0.18.0
+exchange_calendars==4.13.2
 h11==0.16.0
 httpcore==1.0.9
+httpcore2==2.13.1
 httpx==0.28.1
 httpx-sse==0.4.3
+httpx2==2.13.1
 idna==3.18
 jiter==0.16.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
+korean_lunar_calendar==0.4.0
+markdown-it-py==4.2.0
+MarkupSafe==3.0.4
 mcp==1.28.1
+mdurl==0.1.2
+numpy==2.5.4
+packaging==26.3
+pandas==3.0.6
+pandas_market_calendars==5.5.0
+psutil==7.2.2
 pycparser==3.0
 pydantic==2.13.4
 pydantic-settings==2.14.2
 pydantic_core==2.46.4
+Pygments==2.21.0
 PyJWT==2.13.0
+pyluach==2.3.0
+python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-multipart==0.0.32
 pytz==2026.2
 pywin32==312; sys_platform == "win32"
+PyYAML==6.0.3
 referencing==0.37.0
+regex==2026.9.29
+requests==2.34.2
+rich==15.0.0
 rpds-py==2026.6.3
+setuptools==84.0.0
+shellingham==1.5.4
+six==1.17.0
 sniffio==1.3.1
 sse-starlette==3.4.5
 starlette==1.3.1
+toolz==1.2.0
+truststore==0.10.5
+typer==0.27.3
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 tzdata==2026.2
 tzlocal==5.4.4
+urllib3==2.7.0
 uvicorn==0.51.0
-
-# ML/Sentiment dependencies (only needed when sentiment_selection.enabled=true
-# in config/settings.json) live in requirements-ml.txt.
-# Development/test tooling lives in requirements-dev.txt.

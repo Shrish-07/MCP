@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -7,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
-from models.decisions import TradeDecision
+from models.decisions import DecisionType, ExecutionResult, TradeDecision
 from models.portfolio import Portfolio, Position, PositionRecord
 from models.market_data import EquityQuote
 
@@ -49,18 +50,50 @@ def position_snapshot(record: PositionRecord, current_price: float) -> str:
 
 
 class PositionManager:
-    """Manage position entry/exit persistence and exit checks."""
+    """Manage position entry/exit persistence and exit checks.
 
-    REVIEW_GAIN_PCT = 0.15  # 15% gain triggers a soft review
+    Every threshold is read from config/settings.json (trading.*).
+    Also owns the SHARED per-ticker asyncio lock registry used by BOTH the
+    scheduled cycles and the price monitor, so two paths can never race the
+    same holding.
+    """
 
-    def __init__(self, path: str | None = None, max_holding_days: int = 15) -> None:
-        self.logger = logging.getLogger("robinhood-agent.core.position_manager")
-        # `trading.max_holding_days` from config/settings.json (wired in main.py)
-        self.max_holding_days = int(max_holding_days)
-        self._path = Path(path) if path else Path(__file__).resolve().parent.parent / "logs" / "positions.json"
+    DEFAULT_REVIEW_GAIN_PCT = 0.15  # fallback if trading.profit_review_pct absent
+    DEFAULT_MAX_HOLDING_DAYS = 15
+    DEFAULT_STOP_BANDS = [[0, -0.07], [30, -0.10], [60, -0.13], [90, -0.16]]
+    DEFAULT_TAKE_PROFIT_PCT = 0.20
+    DEFAULT_STOP_LOSS_PCT = -0.07
+
+    def __init__(self, path: str | None = None, config: dict | None = None) -> None:
+        self.logger = logging.getLogger("robinhood-agent.core.position.manager")
+        self._path = Path(path) if path else Path(__file__).resolve().parent.parent.parent / "logs" / "positions.json"
         self._path.parent.mkdir(exist_ok=True)
         if not self._path.exists():
             self._path.write_text("[]", encoding="utf-8")
+
+        trading = (config or {}).get("trading") or {}
+        try:
+            self._review_gain_pct = float(trading.get("profit_review_pct", self.DEFAULT_REVIEW_GAIN_PCT))
+            self._max_holding_days = int(trading.get("max_holding_days", self.DEFAULT_MAX_HOLDING_DAYS))
+            self._take_profit_pct = float(trading.get("take_profit_pct", self.DEFAULT_TAKE_PROFIT_PCT))
+            bands = [[float(t), float(p)] for t, p in (trading.get("stop_loss_bands") or self.DEFAULT_STOP_BANDS)]
+            self._stop_bands = sorted(bands, key=lambda row: row[0])
+        except (TypeError, ValueError) as exc:
+            self.logger.error("position_manager_config_invalid (%s) — using safe defaults", exc)
+            self._review_gain_pct = self.DEFAULT_REVIEW_GAIN_PCT
+            self._max_holding_days = self.DEFAULT_MAX_HOLDING_DAYS
+            self._take_profit_pct = self.DEFAULT_TAKE_PROFIT_PCT
+            self._stop_bands = list(self.DEFAULT_STOP_BANDS)
+
+        # Shared per-ticker locks — ONE registry for cycles AND monitor.
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def lock_for(self, ticker: str) -> asyncio.Lock:
+        """Return the shared per-ticker lock (cycles + monitor both use it)."""
+        key = ticker.upper()
+        if key not in self._locks:
+            self._locks[key] = asyncio.Lock()
+        return self._locks[key]
 
     # ------------------------------------------------------------------ #
     #  Live ↔ local reconciliation
@@ -108,10 +141,11 @@ class PositionManager:
                     entry_price=entry_price,
                     entry_date=datetime.now(timezone.utc).date().isoformat(),
                     entry_edge_score=0.0,
-                    stop_loss_pct=-0.10,
-                    take_profit_pct=0.20,
+                    stop_loss_pct=self.DEFAULT_STOP_LOSS_PCT,
+                    take_profit_pct=self._take_profit_pct,
                     quantity=mcp_pos.quantity,
                     order_id="",
+                    reconciled=True,  # not from our own fill — see PositionRecord.reconciled
                 )
                 kept.append(new_record)
                 added.append(f"{ticker}(qty={mcp_pos.quantity:.6f},avg_cost={entry_price:.2f})")
@@ -155,29 +189,32 @@ class PositionManager:
         if qty_adjusted:
             self.logger.warning("position_reconcile_quantity_drift %s", ", ".join(qty_adjusted))
 
-    @staticmethod
-    def _vol_adjusted_stop_loss(realized_vol_30d: float) -> float:
+    def _vol_adjusted_stop_loss(self, realized_vol_30d: float) -> float:
         """Widen the stop-loss for higher-volatility names instead of a
-        flat -7% that gets triggered by routine noise on growth stocks.
-        Bands, based on 30-day annualized realized volatility:
-          < 30%  -> -7%  (calm names, tight stop is appropriate)
-          30-60% -> -10% (moderate vol, e.g. AVGO/NEM today)
-          60-90% -> -13% (high vol, e.g. AVGO at 66%)
-          > 90%  -> -16% (extreme vol, e.g. MU historically)
-        """
-        if realized_vol_30d < 30.0:
-            return -0.07
-        if realized_vol_30d < 60.0:
-            return -0.10
-        if realized_vol_30d < 90.0:
-            return -0.13
-        return -0.16
+        flat stop that gets triggered by routine noise on growth stocks.
 
-    def record_entry(self, result: TradeDecision | object, decision: TradeDecision, realized_vol_30d: float = 0.0) -> None:
-        """Persist a position entry record for executed BUY/ROTATE orders."""
-        # This method expects an ExecutionResult-like object for result
+        Bands are config-driven (trading.stop_loss_bands: [[vol_floor, stop], ...]
+        in ascending vol_floor order; the last band the vol clears wins).
+        """
         try:
-            if decision.decision not in (decision.decision.__class__.BUY, decision.decision.__class__.ROTATE):
+            vol = float(realized_vol_30d or 0.0)
+        except (TypeError, ValueError):
+            vol = 0.0
+        stop = self.DEFAULT_STOP_LOSS_PCT
+        for floor, band_stop in self._stop_bands:
+            if vol >= floor:
+                stop = band_stop
+        return stop
+
+    def record_entry(self, result: ExecutionResult, decision: TradeDecision, realized_vol_30d: float = 0.0) -> None:
+        """Persist a position entry record for executed BUY/ROTATE orders.
+
+        If a record for the same ticker already exists, it is MERGED with a
+        weighted-average entry price and summed quantity (broker-style average
+        cost; original entry_date kept) — never silently overwritten.
+        """
+        try:
+            if decision.decision not in (DecisionType.BUY, DecisionType.ROTATE):
                 return
         except Exception:
             pass
@@ -185,7 +222,7 @@ class PositionManager:
         try:
             entry_price = float(getattr(result, "fill_price", 0.0))
             quantity = float(getattr(result, "quantity", 0.0))
-        except Exception:
+        except (TypeError, ValueError):
             entry_price = 0.0
             quantity = 0.0
 
@@ -195,23 +232,45 @@ class PositionManager:
             entry_date=datetime.now(timezone.utc).date().isoformat(),
             entry_edge_score=decision.edge_score if hasattr(decision, "edge_score") else 0.0,
             stop_loss_pct=self._vol_adjusted_stop_loss(realized_vol_30d),
-            take_profit_pct=0.20,
+            take_profit_pct=self._take_profit_pct,
             quantity=quantity,
-            order_id=getattr(result, "order_id", ""),
+            order_id=getattr(result, "order_id", "") or "",
         )
+
+        # ---- weighted-average merge (defensive: overwrites corrupt P&L) ----
+        entries = self.get_open_records()
+        existing = next((item for item in entries if item.ticker == record.ticker), None)
+        if existing is not None:
+            old_qty = float(existing.quantity or 0.0)
+            old_px = float(existing.entry_price or 0.0)
+            total_qty = old_qty + record.quantity
+            if total_qty > 0 and record.entry_price > 0:
+                merged_px = (old_px * old_qty + record.entry_price * record.quantity) / total_qty
+                self.logger.warning(
+                    "record_entry_merge ticker=%s old_px=%.4f old_qty=%.6f new_px=%.4f new_qty=%.6f merged_px=%.4f merged_qty=%.6f",
+                    record.ticker, old_px, old_qty, record.entry_price, record.quantity, merged_px, total_qty,
+                )
+                record.entry_price = merged_px
+                record.quantity = total_qty
+                # Keep the ORIGINAL entry date and the WIDER (looser) stop —
+                # we never let a re-entry tighten an existing risk envelope.
+                record.entry_date = existing.entry_date or record.entry_date
+                record.stop_loss_pct = min(existing.stop_loss_pct, record.stop_loss_pct)
+                record.take_profit_pct = max(existing.take_profit_pct, record.take_profit_pct)
+                record.reconciled = existing.reconciled
+                record.order_id = record.order_id or existing.order_id
+                entries = [item for item in entries if item.ticker != record.ticker]
+
         self.logger.info(
             "record_entry ticker=%s entry_price=%.4f qty=%.6f vol_30d=%.1f stop_loss_pct=%.2f",
             record.ticker, record.entry_price, record.quantity,
             realized_vol_30d, record.stop_loss_pct,
         )
-        entries = self.get_open_records()
-        entries = [item for item in entries if item.ticker != record.ticker]
         entries.append(record)
         tmp = self._path.with_suffix(".tmp")
         try:
             tmp.write_text(json.dumps([item.model_dump(mode="json") for item in entries], indent=2), encoding="utf-8")
             tmp.replace(self._path)
-            self.logger.info("position_record_entry ticker=%s entry_price=%.4f qty=%.6f", record.ticker, record.entry_price, record.quantity)
         except Exception as exc:
             self.logger.warning("position_write_failed: %s", exc)
 
@@ -232,10 +291,11 @@ class PositionManager:
     def _perf_path(self) -> Path:
         return self._path.parent / "performance.json"
 
-    def record_realized_pnl(self, ticker: str, entry_price: float, exit_price: float, quantity: float) -> None:
+    def record_realized_pnl(self, ticker: str, entry_price: float, exit_price: float, quantity: float) -> float:
         """Append a closed trade to performance.json and recompute totals.
 
         Pure-python math; no LLM, no extra API call. Atomic write.
+        Returns the realized dollar P&L booked (0.0 if nothing was recorded).
         """
         try:
             entry = float(entry_price or 0.0)
@@ -243,12 +303,12 @@ class PositionManager:
             qty = float(quantity or 0.0)
             if entry <= 0 or exit_px <= 0 or qty <= 0:
                 self.logger.info("record_realized_pnl_skipped ticker=%s invalid entry/exit/qty", ticker)
-                return
+                return 0.0
             realized = (exit_px - entry) * qty
             realized_pct = (exit_px - entry) / entry
         except Exception as exc:
             self.logger.warning("record_realized_pnl_math_failed ticker=%s: %s", ticker, exc)
-            return
+            return 0.0
 
         path = self._perf_path()
         try:
@@ -283,6 +343,7 @@ class PositionManager:
             )
         except Exception as exc:
             self.logger.warning("performance_write_failed ticker=%s: %s", ticker, exc)
+        return realized
 
     def write_performance_snapshot(self, quotes: dict) -> None:
         """Write open-position unrealized marks from already-fetched quotes.
@@ -428,12 +489,15 @@ class PositionManager:
                 continue
 
             # Soft profit review (advisory only) and max holding period advisory.
-            profit_review = unrealized_pct >= self.REVIEW_GAIN_PCT
+            # Both thresholds come from config — never hard-coded.
+            profit_review = unrealized_pct >= self._review_gain_pct
             try:
                 days_held = (datetime.now(timezone.utc).date() - datetime.fromisoformat(record.entry_date).date()).days
             except Exception:
                 days_held = 0
-            max_holding = days_held > self.max_holding_days
+            # Reconciled records (added from the broker, not from our own fill)
+            # skip the max-hold advisory — their true entry date is unknown.
+            max_holding = (not record.reconciled) and (days_held > self._max_holding_days)
 
             # Combine signals: if both conditions apply, emit a single combined signal.
             if profit_review and max_holding:

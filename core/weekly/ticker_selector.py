@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import List, Set
 
-logger = logging.getLogger("robinhood-agent.core.ticker_selector")
+logger = logging.getLogger("robinhood-agent.core.weekly.ticker_selector")
 
 
 def select_universe(

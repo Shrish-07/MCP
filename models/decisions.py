@@ -12,6 +12,26 @@ class DecisionType(str, Enum):
     ROTATE = "ROTATE"
 
 
+# Canonical success statuses — single definition, imported by main.py.
+# "SUBMITTED" is included: a submitted live order is ownership-in-progress.
+SUCCESS_STATUSES = ("EXECUTED", "SUBMITTED", "WOULD_EXECUTE")
+
+# Canonical exit-review rubric — single definition, shared by
+# core/decision/engine.py (cycles) and main.py (monitor path).
+EXIT_REVIEW_RULES = (
+    "EXIT REVIEW RULES:\n"
+    "- You MUST state entry vs current and unrealized % in reasoning.\n"
+    "- SELL needs explicit evidence: thesis broken, technical failure vs plan, or capital better used elsewhere.\n"
+    "- For EXIT decisions, score edge as EXIT CONVICTION (not buy quality): "
+    "catalyst_strength = strength of the exit reason (0-2), "
+    "technical_confirmation = price action supports exit (0-2), "
+    "portfolio_fit = value of freeing capital / cutting risk (0-1).\n"
+    "- HOLD is valid when unrealized is small and thesis still intact, including holding through earnings when the opportunity is sound.\n"
+    "- STOP_LOSS trigger remains forced SELL (existing code path).\n"
+    "- Earnings proximity is informational only — never auto-SELL solely because earnings are near."
+)
+
+
 class CycleType(str, Enum):
     OPEN = "OPEN"
     MID = "MID"
@@ -78,6 +98,8 @@ class JournalEntry(BaseModel):
     fill_price: float | None = None
     unrealized_pnl_pct: float | None = None
     earnings_flag: bool = False
+    rotated_from: str | None = None
+    rotated_to: str | None = None
 
 
 class TradeDecision(BaseModel):
@@ -111,6 +133,11 @@ class ExecutionResult(BaseModel):
     timestamp: str = ""
     dry_run: bool = True
     side: str = ""
+    # Two-leg rotation metadata (populated when a ROTATE decision executed):
+    rotate_from_ticker: str | None = None
+    rotate_sell_price: float = 0.0
+    rotate_sell_quantity: float = 0.0
+    rotate_realized_pnl: float = 0.0
 
 
 class ExitDecision(BaseModel):

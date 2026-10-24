@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.weekly_selector import WeeklySelector
+from core.weekly.selector import WeeklySelector
 from models.portfolio import PositionRecord
 
 

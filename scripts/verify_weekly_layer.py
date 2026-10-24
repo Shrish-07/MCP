@@ -45,15 +45,24 @@ async def main() -> int:
              cfg["trading"]["max_positions"])
 
     # --- 1. Trigger weekly selector manually (with stubbed news+model so no API calls) ---
-    from core.weekly_selector import WeeklySelector
+    from core.weekly.selector import WeeklySelector
+    import tempfile
+
     selector = WeeklySelector(cfg)
+    # NEVER write to the real data/ directory — the verify run must not
+    # poison the live agent's selected universe (data/selected_universe.json).
+    sandbox = Path(tempfile.mkdtemp(prefix="verify_weekly_"))
+    selector.data_dir = sandbox
+    selector.selected_universe_path = sandbox / "selected_universe.json"
+    selector.candidate_universe_path = sandbox / "candidate_universe.json"
+    log.info("sandboxed selector data dir -> %s", sandbox)
     log.info("selector created: enabled=%s universe_size=%d", selector.enabled, selector.universe_size)
 
     # Stub the sentiment model so the harness is truly offline-deterministic
     # and runs WITHOUT the torch/transformers stack (CI-friendly). The real
     # ModernBERT model is covered separately by tests/test_sentiment.py,
     # which is marked `heavy` and deselected by default.
-    import core.sentiment_model as _sm
+    import core.data.sentiment as _sm
 
     class _StubSentimentModel:
         def score_single(self, headline: str) -> float:
@@ -133,7 +142,7 @@ async def main() -> int:
 
     # --- 7. Live Finnhub fetch (only when key present) ---
     if os.getenv("FINNHUB_API_KEY"):
-        from core.weekly_news import WeeklyNewsFetcher
+        from core.weekly.news import WeeklyNewsFetcher
         fetcher = WeeklyNewsFetcher(lookback_days=7)
         live = await fetcher.fetch_news_for_universe(["AAPL", "MSFT"])
         for sym, items in live.items():
@@ -157,8 +166,8 @@ async def main() -> int:
 
     # --- 9. Secrets check ---
     import re
-    for mod in ("core/sentiment_model.py", "core/weekly_news.py",
-                "core/weekly_selector.py", "core/ticker_selector.py"):
+    for mod in ("core/data/sentiment.py", "core/weekly/news.py",
+                "core/weekly/selector.py", "core/weekly/ticker_selector.py"):
         text = (REPO_ROOT / mod).read_text(encoding="utf-8")
         # Look for hardcoded string literals assigned to sensitive variable names
         for match in re.finditer(

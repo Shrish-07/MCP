@@ -27,7 +27,7 @@ are never called under any circumstance. This script is read-only.
 
 HOW TO RUN (from the project root):
   1. Activate your virtual environment (e.g. .venv\\Scripts\\activate)
-  2. python scripts/mcp_diagnostic_v2.py
+  2. python archive/mcp_diagnostic_v2.py
   3. A browser window will open asking you to log into Robinhood and approve
      access — this is the same kind of one-time approval you would do for
      Claude Code, just now for a plain Python script instead.

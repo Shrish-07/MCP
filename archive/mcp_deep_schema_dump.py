@@ -8,7 +8,7 @@ from pathlib import Path
 
 # This MUST be the first executable code in the file, before any local
 # project imports. It guarantees the project root (the parent of this
-# script's scripts/ directory, where the robinhood_mcp/ package lives) is
+# script's archive/ directory, where the robinhood_mcp/ package lives) is
 # at the very front of the import search path, regardless of anything
 # else that could interfere.
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)

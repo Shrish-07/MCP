@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from core.weekly_news import WeeklyNewsFetcher
-from core.ticker_selector import select_universe
-from core.position_manager import PositionManager
+from core.data.sentiment import get_sentiment_model
+from core.weekly.news import WeeklyNewsFetcher
+from core.weekly.ticker_selector import select_universe
+from core.position.manager import PositionManager
 
-logger = logging.getLogger("robinhood-agent.core.weekly_selector")
+logger = logging.getLogger("robinhood-agent.core.weekly.selector")
 
 
 class WeeklySelector:
@@ -31,12 +33,12 @@ class WeeklySelector:
         self.lookback_days = int(ss.get("lookback_days", 7))
         self.min_sentiment_score = float(ss.get("min_sentiment_score", -1.0))
 
-        self.data_dir = Path(__file__).resolve().parent.parent / "data"
+        self.data_dir = Path(__file__).resolve().parent.parent.parent / "data"
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.selected_universe_path = self.data_dir / "selected_universe.json"
         self.candidate_universe_path = self.data_dir / "candidate_universe.json"
 
-        self.position_manager = PositionManager()
+        self.position_manager = PositionManager(config=config)
         self.news_fetcher = WeeklyNewsFetcher(lookback_days=self.lookback_days)
         self.sentiment_model = None  # Lazy load
 
@@ -48,17 +50,13 @@ class WeeklySelector:
         self.logger.info("weekly_selector_initializing")
         self.candidate_universe = await self._load_candidate_universe()
         self.selected_universe = await self._load_selected_universe()
-        # Lazy-load the sentiment model once. The import lives HERE (not at
-        # module top level) so the agent starts fine without the heavy
-        # torch/transformers stack when sentiment selection is disabled.
-        from core.sentiment_model import get_sentiment_model
+        # Lazy-load the sentiment model once. Without the ML stack the model
+        # stays None and run_selection degrades safely (keeps the previous
+        # universe) instead of crashing the whole agent.
         try:
             self.sentiment_model = get_sentiment_model()
-        except ImportError as exc:
-            self.logger.error(
-                "sentiment model unavailable - install requirements-ml.txt "
-                "to enable sentiment selection: %s", exc,
-            )
+        except Exception as exc:
+            self.logger.warning("sentiment_model_unavailable (%s) — weekly selection will keep previous universe", exc)
             self.sentiment_model = None
         self.logger.info(
             "weekly_selector_initialized candidates=%d previous_selection=%d",
@@ -111,7 +109,7 @@ class WeeklySelector:
             data = {
                 "tickers": tickers,
                 "scores": scores,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(pytz.UTC).isoformat(),
                 "universe_size": self.universe_size,
             }
             with open(self.selected_universe_path, "w", encoding="utf-8") as f:

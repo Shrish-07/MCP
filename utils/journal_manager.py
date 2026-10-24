@@ -13,6 +13,8 @@ class JournalManager:
     """Manage per-ticker journal files stored under journals/TICKER.json.
 
     Each file contains a JSON array of JournalEntry objects sorted by timestamp ascending.
+    Journals are allowed to be garbage — never crash the app because a
+    journal file is corrupted or missing.
     """
 
     def __init__(self, base_dir: Path | None = None, max_entries_per_ticker: int = 90) -> None:

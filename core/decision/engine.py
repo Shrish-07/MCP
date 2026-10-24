@@ -4,13 +4,13 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from models.decisions import DecisionType, TradeDecision, StructuredEdgeScore, CycleType
+from models.decisions import EXIT_REVIEW_RULES, DecisionType, TradeDecision, StructuredEdgeScore, CycleType
 from models.market_data import MarketMetrics
 from models.portfolio import Portfolio, PositionRecord
-from utils.anthropic_client import AnthropicClient
+from utils.anthropic_client import AnthropicClient, strip_fences
 from utils.journal_manager import JournalManager
 from utils.earnings_calendar import EarningsCalendar
-from core.position_manager import ExitSignal, PositionManager, position_snapshot
+from core.position.manager import ExitSignal, PositionManager, position_snapshot
 
 
 class DecisionEngine:
@@ -30,9 +30,12 @@ This system runs three cycle types: OPEN, MID, and CLOSE.
   the journal block) and earnings context. Past DECISIONS are
   intentionally not shown â€" do not infer that a prior IGNORE means
   you should IGNORE again; each cycle is independent.
-- MID: intraday reassessment; raise the bar for new positions versus OPEN.
-- CLOSE: never open new positions. Only hold, sell, or set up tomorrow's
-  thesis in your reasoning_summary.
+- MID: intraday reassessment; the code raises the entry bar slightly
+  versus OPEN. Do not preempt that bar; simply score honestly.
+- CLOSE: entries and rotations ARE allowed, but the code applies the
+  highest entry bar of the day because you cannot react until tomorrow's
+  session. Demand the strongest evidence — a specific overnight catalyst,
+  not a hunch. Either way, set up tomorrow's thesis in reasoning_summary.
 
 THE CORE FORWARD-LOOKING TEST (apply this before anything else)
 For every ticker, before scoring anything, answer this explicitly inside
@@ -214,18 +217,37 @@ METRIC DEFINITIONS (use these exact definitions, do not infer others)
   the MARKET METRICS JSON block provided in the user prompt.
 
 RULES (non-overridable)
-- Max position size: 10% of portfolio
-- Max open positions: {MAX_POSITIONS}
-- Only recommend opening a position when the computed edge.total >= {EDGE_THRESHOLD}
-- Prefer IGNORE/HOLD. ROTATE only when incoming edge >= 4.0 and clearly
-  superior to the weakest current holding.
+- Max open positions: {MAX_POSITIONS} (enforced in code, not by you)
+- Only recommend BUY or ROTATE when the computed edge.total >= {EDGE_THRESHOLD}
+  (code may raise this bar further on MID and especially CLOSE cycles —
+  score honestly and let the bar do its job; do not inflate to pass it).
+- Prefer IGNORE/HOLD.
+
+ROTATE — swap capital from a held position into this stronger opportunity:
+- Emitted ONLY when evaluating a NEW (non-held) ticker. rotate_from_ticker
+  must name a ticker from the OTHER OPEN POSITIONS roster (a name you
+  actually hold — WEAKEST CURRENT POSITION is the natural candidate).
+- You must satisfy BOTH bars in your reasoning: (1) an EXIT case for
+  rotate_from_ticker at the same evidence standard as a SELL (thesis
+  broken, technical failure vs plan, or capital clearly better deployed),
+  AND (2) an ENTRY case for this ticker (the same forward-looking test
+  as a BUY). State both in reasoning_summary.
+- edge scores the NEW entry (catalyst_strength / technical_confirmation /
+  portfolio_fit of the new name). Code guarantees execution order: the
+  old position is SOLD first; the new BUY only happens if that sell fills
+  (record it as entry edge, not buy, in risk_notes). Rotation is
+  count-neutral, so it stays a valid move even at {MAX_POSITIONS} positions.
+- If the old position's thesis is merely tired and the new name is only
+  marginally better, prefer HOLD/IGNORE — churn has real cost.
+- To exit a holding WITHOUT a replacement, that is a SELL in that
+  position's own review — not a ROTATE.
 - Past journal entries provide historical PRICE and METRIC context
   only (prices, RSI, MACD, BB, volumes over time). Do NOT treat a
   prior IGNORE or BUY as evidence for the current decision.
   Re-evaluate from scratch using today's metrics and news, using past
   prices solely to read how the stock has moved — not what was
   decided about it.
-- CLOSE cycle: never recommend BUY.
+- CLOSE-cycle entries are allowed — the raised bar (see RULES) is the gate.
 
 OUTPUT
 Return only valid JSON with this schema (no markdown or extra text):
@@ -254,31 +276,21 @@ Return only valid JSON with this schema (no markdown or extra text):
         }
     ]
 
-    # Short exit-review rubric injected on all exit / held-review paths (~100 tokens).
-    _EXIT_REVIEW_RULES = (
-        "EXIT REVIEW RULES:\n"
-        "- You MUST state entry vs current and unrealized % in reasoning.\n"
-        "- SELL needs explicit evidence: thesis broken, technical failure vs plan, or capital better used elsewhere.\n"
-        "- For EXIT decisions, score edge as EXIT CONVICTION (not buy quality): "
-        "catalyst_strength = strength of the exit reason (0-2), "
-        "technical_confirmation = price action supports exit (0-2), "
-        "portfolio_fit = value of freeing capital / cutting risk (0-1).\n"
-        "- HOLD is valid when unrealized is small and thesis still intact, including holding through earnings when the opportunity is sound.\n"
-        "- STOP_LOSS trigger remains forced SELL (existing code path).\n"
-        "- Earnings proximity is informational only — never auto-SELL solely because earnings are near."
-    )
-
     def __init__(self, client: AnthropicClient, journal_manager: JournalManager, earnings_calendar: EarningsCalendar, settings: dict | None = None) -> None:
         self.client = client
         self.journal_manager = journal_manager
         self.earnings_calendar = earnings_calendar
         self._settings = settings or {}
-        self._edge_threshold = float(self._settings.get("trading", {}).get("edge_score_threshold", 3.0))
-        self._max_positions = int(self._settings.get("trading", {}).get("max_positions", 12))
-        self.logger = logging.getLogger("robinhood-agent.core.decision_engine")
-        # Build the system prompt with the live threshold interpolated
-        _prompt_text = self.SYSTEM_PROMPT_TEXT.replace("{EDGE_THRESHOLD}", f"{self._edge_threshold:g}")
-        _prompt_text = _prompt_text.replace("{MAX_POSITIONS}", str(self._max_positions))
+        trading_cfg = self._settings.get("trading", {}) or {}
+        self._edge_threshold = float(trading_cfg.get("edge_score_threshold", 3.0))
+        self._max_positions = int(trading_cfg.get("max_positions", 12))
+        self.logger = logging.getLogger("robinhood-agent.core.decision.engine")
+        # Build the system prompt with the live threshold + position cap interpolated
+        _prompt_text = (
+            self.SYSTEM_PROMPT_TEXT
+            .replace("{EDGE_THRESHOLD}", f"{self._edge_threshold:g}")
+            .replace("{MAX_POSITIONS}", str(self._max_positions))
+        )
         self.system_prompt = [
             {
                 "type": "text",
@@ -286,6 +298,59 @@ Return only valid JSON with this schema (no markdown or extra text):
                 "cache_control": {"type": "ephemeral"},
             }
         ]
+
+    # ------------------------------------------------------------------ #
+    #  Response parsing helpers — clamping beats silent loss
+    # ------------------------------------------------------------------ #
+
+    def _parse_edge(self, payload: dict, ticker: str) -> StructuredEdgeScore:
+        """Parse + CLAMP the model's edge output.
+
+        Previously, an out-of-range component (e.g. catalyst_strength=2.5)
+        hit Pydantic's bounds, raised, and was caught into a SILENT 0.0 —
+        a genuine signal became an unexplained REJECTED_LOW_EDGE. Now each
+        component is clamped into its band first (with a loud log), and the
+        legacy `edge_score` float is clamped to [0, 5].
+        """
+        edge_obj = payload.get("edge")
+        if not isinstance(edge_obj, dict):
+            try:
+                legacy = float(payload.get("edge_score", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                legacy = 0.0
+            clamped_legacy = max(0.0, min(legacy, 5.0))
+            if clamped_legacy != legacy:
+                self.logger.info("edge_total_clamped ticker=%s raw=%.3f clamped=%.3f",
+                                 ticker, legacy, clamped_legacy)
+            return StructuredEdgeScore(total=clamped_legacy)
+
+        def _component(key: str, hi: float) -> float:
+            try:
+                val = float(edge_obj.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                val = 0.0
+            clamped = max(0.0, min(val, hi))
+            if clamped != val:
+                self.logger.info("edge_component_clamped ticker=%s key=%s raw=%.3f clamped=%.3f",
+                                 ticker, key, val, clamped)
+            return clamped
+
+        edge = StructuredEdgeScore(
+            catalyst_strength=_component("catalyst_strength", 2.0),
+            technical_confirmation=_component("technical_confirmation", 2.0),
+            portfolio_fit=_component("portfolio_fit", 1.0),
+        )
+        edge.compute_total()
+        return edge
+
+    def _parse_decision(self, raw, default: DecisionType) -> DecisionType:
+        """Case-insensitive decision parsing. An unparseable value falls back
+        to `default` with a DISTINCT log line (never mistaken for an API error)."""
+        try:
+            return DecisionType(str(raw or "").strip().upper())
+        except ValueError:
+            self.logger.warning("decision_parse_failed raw=%r fallback=%s", raw, default.value)
+            return default
 
     async def review_exit(
         self, exit_signal: ExitSignal, metrics: MarketMetrics, news: list[str], portfolio: Portfolio, cycle_type: CycleType,
@@ -327,32 +392,15 @@ Return only valid JSON with this schema (no markdown or extra text):
         )
         try:
             response = await self.client.complete(self.system_prompt, user_prompt)
-            payload = json.loads(self._strip_fences(response))
-
-            # Normalize edge output: accept either legacy 'edge_score' or new structured 'edge' dict
-            edge_obj = payload.get("edge")
-            if not isinstance(edge_obj, dict):
-                # fallback to legacy edge_score numeric
-                edge_score_val = float(payload.get("edge_score", 0.0) or 0.0)
-                edge = StructuredEdgeScore(catalyst_strength=0.0, technical_confirmation=0.0, portfolio_fit=0.0, total=edge_score_val)
-            else:
-                try:
-                    edge = StructuredEdgeScore(
-                        catalyst_strength=float(edge_obj.get("catalyst_strength", 0.0)),
-                        technical_confirmation=float(edge_obj.get("technical_confirmation", 0.0)),
-                        portfolio_fit=float(edge_obj.get("portfolio_fit", 0.0)),
-                    )
-                    edge.compute_total()
-                except Exception:
-                    edge = StructuredEdgeScore()
+            payload = json.loads(strip_fences(response))
 
             trade = TradeDecision(
                 ticker=exit_signal.ticker,
                 bull_thesis=str(payload.get("bull_thesis", "")),
                 bear_thesis=str(payload.get("bear_thesis", "")),
                 failure_conditions=list(payload.get("failure_conditions", [])) if payload.get("failure_conditions") else [],
-                decision=DecisionType(payload.get("decision", "IGNORE")),
-                edge=edge,
+                decision=self._parse_decision(payload.get("decision", "IGNORE"), DecisionType.IGNORE),
+                edge=self._parse_edge(payload, exit_signal.ticker),
                 action_type=str(payload.get("action_type", "NONE")),
                 replaced_ticker=payload.get("replaced_ticker", None),
                 rotate_from_ticker=payload.get("rotate_from_ticker", None),
@@ -403,30 +451,15 @@ Return only valid JSON with this schema (no markdown or extra text):
         )
         try:
             response = await self.client.complete(self.system_prompt, user_prompt)
-            payload = json.loads(self._strip_fences(response))
-
-            edge_obj = payload.get("edge")
-            if not isinstance(edge_obj, dict):
-                edge_score_val = float(payload.get("edge_score", 0.0) or 0.0)
-                edge = StructuredEdgeScore(catalyst_strength=0.0, technical_confirmation=0.0, portfolio_fit=0.0, total=edge_score_val)
-            else:
-                try:
-                    edge = StructuredEdgeScore(
-                        catalyst_strength=float(edge_obj.get("catalyst_strength", 0.0)),
-                        technical_confirmation=float(edge_obj.get("technical_confirmation", 0.0)),
-                        portfolio_fit=float(edge_obj.get("portfolio_fit", 0.0)),
-                    )
-                    edge.compute_total()
-                except Exception:
-                    edge = StructuredEdgeScore()
+            payload = json.loads(strip_fences(response))
 
             decision = TradeDecision(
                 ticker=ticker,
                 bull_thesis=str(payload.get("bull_thesis", "")),
                 bear_thesis=str(payload.get("bear_thesis", "")),
                 failure_conditions=list(payload.get("failure_conditions", [])) if payload.get("failure_conditions") else [],
-                decision=DecisionType(payload.get("decision", "IGNORE")),
-                edge=edge,
+                decision=self._parse_decision(payload.get("decision", "IGNORE"), DecisionType.IGNORE),
+                edge=self._parse_edge(payload, ticker),
                 action_type=str(payload.get("action_type", "NONE")),
                 replaced_ticker=payload.get("replaced_ticker", None),
                 rotate_from_ticker=payload.get("rotate_from_ticker", None),
@@ -436,14 +469,13 @@ Return only valid JSON with this schema (no markdown or extra text):
                 cycle_type=cycle_type.value if isinstance(cycle_type, CycleType) else str(cycle_type),
             )
 
-            # Enforce max open positions (decision-level only)
-            if existing_positions_count >= self._max_positions and decision.decision == DecisionType.BUY:
+            # Enforce max open positions (decision-level safety hint; the
+            # ExecutionEngine re-enforces with fresh state). ROTATE is
+            # count-neutral (one out, one in) so it survives a full book.
+            if decision.decision == DecisionType.BUY and existing_positions_count >= self._max_positions:
                 decision.decision = DecisionType.IGNORE
-
-            # CLOSE-cycle override: do not open new BUYs (size resolved at execution)
-            if isinstance(cycle_type, CycleType) and cycle_type == CycleType.CLOSE and decision.decision == DecisionType.BUY:
-                decision.decision = DecisionType.IGNORE
-                decision.reasoning_summary = (decision.reasoning_summary or "") + " | Overridden: CLOSE cycle prevents new buys."
+                decision.reasoning_summary = (decision.reasoning_summary or "") + \
+                    f" | Overridden: at max_positions={self._max_positions}. Use ROTATE to swap."
 
             self.logger.info(
                 "DECISION_FINAL ticker=%s final_decision=%s edge_total=%.4f cycle=%s",
@@ -469,12 +501,9 @@ Return only valid JSON with this schema (no markdown or extra text):
 
     @staticmethod
     def _strip_fences(text: str) -> str:
-        cleaned = text.strip()
-        cleaned = cleaned.removeprefix("```")
-        cleaned = cleaned.removesuffix("```")
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:].lstrip()
-        return cleaned.strip()
+        # Canonical implementation lives in utils.anthropic_client; kept
+        # here as a thin alias for main.py's monitor-path call sites.
+        return strip_fences(text)
 
     def _build_user_prompt(
         self, exit_signal: ExitSignal, metrics: MarketMetrics, news: list[str], portfolio: Portfolio, cycle_type: CycleType, spy_context: str = "",
@@ -531,7 +560,7 @@ Return only valid JSON with this schema (no markdown or extra text):
             f"NEWS HEADLINES:\n{json.dumps(news, indent=2)}\n\n"
             f"MARKET METRICS:\n{json.dumps(metrics.model_dump(mode='json'), indent=2)}\n\n"
             f"{account_line}\n"
-            + self._EXIT_REVIEW_RULES + "\n"
+            + EXIT_REVIEW_RULES + "\n"
             + "Decide whether to HOLD or SELL.\n"
         )
 

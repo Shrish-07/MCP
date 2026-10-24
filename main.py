@@ -3,48 +3,39 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from datetime import datetime, timezone, time, timedelta
 from pathlib import Path
-from typing import Optional
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
 
-from core.data_ingest import DataIngestLayer
-from core.decision_engine import DecisionEngine
-from core.execution import ExecutionEngine
-from core.metrics import MetricsEngine
-from core.news_fetch import NewsFetcher
+from core.data.ingest import DataIngestLayer
+from core.decision.engine import DecisionEngine
+from core.execution.engine import ExecutionEngine
+from core.data.metrics import MetricsEngine
+from core.data.news import NewsFetcher
 from models.news import NewsItem
-from core.pnl_tracker import PnLTracker
-from core.position_manager import PositionManager, ExitSignal, position_snapshot
+from core.position.pnl_tracker import PnLTracker
+from core.position.manager import PositionManager, ExitSignal, position_snapshot
 from robinhood_mcp.robinhood_client import RobinhoodMCPClient
-from models.decisions import DecisionType, CycleType, JournalEntry, TradeDecision, StructuredEdgeScore
+from models.decisions import (
+    DecisionType, CycleType, JournalEntry, TradeDecision, StructuredEdgeScore,
+    SUCCESS_STATUSES, EXIT_REVIEW_RULES,
+)
 from models.market_data import MarketMetrics
 from models.portfolio import Portfolio, PositionRecord
+from utils.config import load_config
+from utils.market_calendar import is_market_open_at
 from utils.journal_manager import JournalManager
 from utils.earnings_calendar import EarningsCalendar
 from utils.anthropic_client import AnthropicClient
-from utils.cost_tracker import CostLimitExceededError, CostTracker
-from core.weekly_selector import WeeklySelector, get_weekly_selector
+from utils.cost_tracker import CostTracker
+from core.weekly.selector import WeeklySelector, get_weekly_selector
 from utils.logger import configure_logging
 
 
-# Short exit-review rubric injected on monitor / exit review paths (~100 tokens).
-_EXIT_REVIEW_RULES = (
-    "EXIT REVIEW RULES:\n"
-    "- You MUST state entry vs current and unrealized % in reasoning.\n"
-    "- SELL needs explicit evidence: thesis broken, technical failure vs plan, or capital better used elsewhere.\n"
-    "- For EXIT decisions, score edge as EXIT CONVICTION (not buy quality): "
-    "catalyst_strength = strength of the exit reason (0-2), "
-    "technical_confirmation = price action supports exit (0-2), "
-    "portfolio_fit = value of freeing capital / cutting risk (0-1).\n"
-    "- HOLD is valid when unrealized is small and thesis still intact, including holding through earnings when the opportunity is sound.\n"
-    "- STOP_LOSS trigger remains forced SELL (existing code path).\n"
-    "- Earnings proximity is informational only — never auto-SELL solely because earnings are near."
-)
+# Canonical exit-review rubric now lives in models.decisions (shared with
+# core/decision/engine.py) — imported above as EXIT_REVIEW_RULES.
 
 
 # Compact monitor-only system prompt for the 1-minute threshold path (~300 tokens).
@@ -92,10 +83,11 @@ _MONITOR_SYSTEM_PROMPT = [
 
 
 # Per-ticker cooldowns for SOFT monitor signals so a stuck >=15% / >=20% gain
-# does not re-query the LLM every 60 seconds after a HOLD. STOP_LOSS is a hard
-# risk rule and is NEVER throttled.
-MONITOR_SOFT_COOLDOWN = timedelta(minutes=15)   # PROFIT_REVIEW
-MONITOR_TARGET_COOLDOWN = timedelta(minutes=5)  # PROFIT_TARGET (closer to exit)
+# does not re-query the LLM between ticks after a HOLD. STOP_LOSS is a hard
+# risk rule and is NEVER throttled. Values come from settings.json
+# (monitor.profit_review_cooldown_min / monitor.profit_target_cooldown_min);
+# these module constants only seed fallbacks if config keys are removed,
+# and self._monitor_locks was folded into PositionManager's shared registry.
 
 
 class TradingAgent:
@@ -106,30 +98,30 @@ class TradingAgent:
     def __init__(self) -> None:
         self.logger = logging.getLogger("robinhood-agent.main")
         self.scheduler = AsyncIOScheduler(timezone="America/New_York")
-        self.config = self._load_config()
+        self.config = load_config()  # settings.json is the single source of truth
         self.cost_tracker = CostTracker()
-        self.mcp_client = RobinhoodMCPClient(
-            mcp_url=self.config.get("robinhood", {}).get("mcp_url") or None,
-        )
+        self.cost_tracker.set_pricing(self.config.get("cost_tracking", {}).get("pricing"))
+        self.mcp_client = RobinhoodMCPClient(url=self.config["execution"]["mcp_url"])
         self.ingest = DataIngestLayer(self.mcp_client)
         self.metrics_engine = MetricsEngine()
         self.news_fetcher = NewsFetcher(
-            AnthropicClient(model=self.config["models"]["cheap"]),
-            finnhub_api_key=os.getenv("FINNHUB_API_KEY", ""),
+            finnhub_api_key=self.config["env"]["FINNHUB_API_KEY"],
             settings=self.config.get("news", {}),
         )
         self.journal_manager = JournalManager()
         self.earnings_calendar = EarningsCalendar()
         self.earnings_calendar.set_client(self.mcp_client)
         self.decision_engine = DecisionEngine(
-            AnthropicClient(model=self.config["models"]["decision"], max_tokens=4096),
+            AnthropicClient(
+                model=self.config["models"]["decision"],
+                max_tokens=int(self.config["models"].get("max_tokens", 4096)),
+                send_temperature=bool(self.config["models"].get("send_temperature", False)),
+            ),
             self.journal_manager,
             self.earnings_calendar,
             settings=self.config,
         )
-        self.position_manager = PositionManager(
-            max_holding_days=int(self.config.get("trading", {}).get("max_holding_days", 15)),
-        )
+        self.position_manager = PositionManager(config=self.config)
         self.pnl_tracker = PnLTracker(self.mcp_client)
         self.executor = ExecutionEngine(self.mcp_client, self.position_manager, self.config)
         self._cached_watchlist: list[str] = []
@@ -138,8 +130,9 @@ class TradingAgent:
         # Weekly sentiment selector (lazy-loaded on first use)
         self._weekly_selector: WeeklySelector | None = None
 
-        # ---- 1-minute price monitor state (sections 3 / 5 / 6) ----
-        self._monitor_locks: dict[str, asyncio.Lock] = {}
+        # ---- Price monitor state (sections 3 / 5 / 6) ----
+        # Per-ticker locks now live in PositionManager.lock_for() so cycles
+        # and the monitor can never race the same holding.
         self._monitor_cache: dict[str, tuple[float, MarketMetrics, list[str]]] = {}
         self._exit_in_progress: set[str] = set()
         # Per-ticker last soft-signal evaluation timestamp (UTC). Used to
@@ -147,39 +140,21 @@ class TradingAgent:
         # not re-queried every tick. STOP_LOSS ignores this entirely.
         self._last_monitor_review: dict[str, datetime] = {}
 
+        # Config-driven monitor behaviour (settings.json → monitor.*)
+        _mon = self.config.get("monitor", {})
+        self._monitor_soft_cd = timedelta(minutes=float(_mon.get("profit_review_cooldown_min", 15)))
+        self._monitor_target_cd = timedelta(minutes=float(_mon.get("profit_target_cooldown_min", 5)))
+        self._monitor_span = str(_mon.get("historicals_span", "3month"))
+        self._monitor_max_hold = bool(_mon.get("check_max_holding", True))
+
     # ==================================================================
     #  CONFIG
     # ==================================================================
 
     def _load_config(self) -> dict:
-        load_dotenv(".env", override=False)  # .env carries SECRETS ONLY (API keys)
-        base = Path(__file__).resolve().parent
-        with (base / "config" / "settings.json").open("r", encoding="utf-8") as handle:
-            settings = json.load(handle)
-
-        # ---- DRY RUN: config/settings.json is the single source of truth ----
-        # The shipped default is dry-run; live trading only ever happens when
-        # a user deliberately sets trading.dry_run = false in their config.
-        trading = settings.setdefault("trading", {})
-        dry_run = trading.get("dry_run", True)
-        if not isinstance(dry_run, bool):
-            dry_run = str(dry_run).strip().lower() != "false"
-        trading["dry_run"] = bool(dry_run)
-
-        # The legacy DRY_RUN env var is intentionally IGNORED (settings.json is
-        # the only toggle source). Warn loudly if someone still sets it.
-        if os.getenv("DRY_RUN"):
-            self.logger.warning(
-                "DRY_RUN found in the environment/.env is no longer used - "
-                "set trading.dry_run in config/settings.json instead"
-            )
-
-        settings["env"] = {
-            "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
-            "FINNHUB_API_KEY": os.getenv("FINNHUB_API_KEY", ""),
-            "DRY_RUN": trading["dry_run"],
-        }
-        return settings
+        """Thin shim: the canonical loader lives in utils.config.
+        Kept so any external callers/tests keep working."""
+        return load_config()
 
     async def _get_weekly_selector(self) -> WeeklySelector:
         """Lazy initialization of weekly selector."""
@@ -212,13 +187,9 @@ class TradingAgent:
         return fallback
 
     def _is_market_open(self) -> bool:
-        ny_tz = pytz.timezone(self.config["schedule"]["timezone"])
-        now = datetime.now(ny_tz)
-        if now.weekday() >= 5:
-            return False
-        open_t = now.replace(hour=9, minute=30, second=0, microsecond=0)
-        close_t = now.replace(hour=16, minute=0, second=0, microsecond=0)
-        return open_t <= now <= close_t
+        """Real NYSE calendar (holidays + half-days handled); fails SAFE
+        (closed) if the calendar itself errors. See utils/market_calendar."""
+        return is_market_open_at()
 
     def _earnings_flag(self, ticker: str) -> bool:
         try:
@@ -233,25 +204,14 @@ class TradingAgent:
             return ""
 
     # ==================================================================
-    #  PRICE MONITOR — 1-MINUTE LIGHTWEIGHT LOOP (sects 3/4/5/6)
+    #  PRICE MONITOR — config-speed loop (settings.json → monitor.*)
     # ==================================================================
-
-    def _monitor_time_window(self, now_et: datetime) -> str:
-        """Return 'MARKET' | 'PRE' | 'POST' | 'CLOSED'."""
-        t = now_et.time()
-        if time(9, 30) <= t <= time(16, 0):
-            return "MARKET"
-        if time(4, 0) <= t <= time(9, 29):
-            return "PRE"
-        if time(16, 1) <= t <= time(20, 0):
-            return "POST"
-        return "CLOSED"
 
     async def _fetch_monitor_metrics(self, ticker: str) -> MarketMetrics:
         """Fetch current metrics for a monitor threshold review."""
         try:
             bars = await self.mcp_client.get_equity_historicals(
-                ticker, span="month", interval="day",
+                ticker, span=self._monitor_span, interval="day",
             )
             if bars:
                 return await self.metrics_engine.compute(ticker, bars, self.mcp_client)
@@ -283,9 +243,11 @@ class TradingAgent:
     async def _monitor_refresh_data(
         self, ticker: str, window: str,
     ) -> tuple[MarketMetrics, list[str]]:
-        """Return (metrics, news) for a monitor trigger, respecting the
-        out-of-cycle windows (PRE/POST → fetch MCP + Finnhub fresh).
-        Falls back to stale cache; never invents numbers."""
+        """Return (metrics, news) for a monitor trigger. A 15-minute in-memory
+        cache keeps repeated threshold hits cheap; anything older is refetched
+        fresh. The monitor only ever runs while the market is open, so no
+        PRE/POST branching exists — the window arg is kept for log context
+        only and never gates freshness."""
         now_ts = datetime.now(timezone.utc).timestamp()
 
         if ticker in self._monitor_cache:
@@ -293,12 +255,8 @@ class TradingAgent:
             if now_ts - ts < 900:  # 15 minutes
                 return cached_m, cached_news
 
-        if window in ("PRE", "POST"):
-            m = await self._fetch_monitor_metrics(ticker)
-            nl = await self._fetch_monitor_news(ticker)
-        else:
-            m = await self._fetch_monitor_metrics(ticker)
-            nl = await self._fetch_monitor_news(ticker)
+        m = await self._fetch_monitor_metrics(ticker)
+        nl = await self._fetch_monitor_news(ticker)
 
         self._monitor_cache[ticker] = (now_ts, m, nl)
         return m, nl
@@ -406,27 +364,19 @@ class TradingAgent:
                 _MONITOR_SYSTEM_PROMPT, user_prompt,
             )
             payload = json.loads(self.decision_engine._strip_fences(response))
-            decision_str = str(payload.get("decision", "HOLD"))
-            edge_obj = payload.get("edge")
-            if not isinstance(edge_obj, dict):
-                edge_val = float(payload.get("edge_score", 0.0) or 0.0)
-                edge = StructuredEdgeScore(catalyst_strength=0.0, technical_confirmation=0.0, portfolio_fit=0.0, total=edge_val)
-            else:
-                edge = StructuredEdgeScore(
-                    catalyst_strength=float(edge_obj.get("catalyst_strength", 0.0)),
-                    technical_confirmation=float(edge_obj.get("technical_confirmation", 0.0)),
-                    portfolio_fit=float(edge_obj.get("portfolio_fit", 0.0)),
-                )
-                edge.compute_total()
+            decision_type = self.decision_engine._parse_decision(
+                payload.get("decision", "HOLD"), DecisionType.HOLD,
+            )
+            edge = self.decision_engine._parse_edge(payload, signal.ticker)
 
             return TradeDecision(
                 ticker=signal.ticker,
                 bull_thesis=str(payload.get("bull_thesis", "")),
                 bear_thesis=str(payload.get("bear_thesis", "")),
                 failure_conditions=list(payload.get("failure_conditions", [])) if payload.get("failure_conditions") else [],
-                decision=DecisionType(decision_str),
+                decision=decision_type,
                 edge=edge,
-                action_type="CLOSE" if decision_str == "SELL" else "NONE",
+                action_type="CLOSE" if decision_type == DecisionType.SELL else "NONE",
                 replaced_ticker=None,
                 rotate_from_ticker=None,
                 risk_notes=str(payload.get("risk_notes", "")),
@@ -453,16 +403,12 @@ class TradingAgent:
             )
 
     async def run_price_monitor(self) -> None:
-        """1-minute loop: pull quotes for held tickers, check thresholds, act.
+        """Config-speed loop: pull quotes for held tickers, check thresholds, act.
 
-        Only active during normal market hours (09:30–16:00 ET).
-        Independent of the OPEN/MID/CLOSE scheduled cycles.
+        Gated by the real NYSE calendar (holidays + early closes handled,
+        not just 09:30–16:00 weekdays). Independent of the scheduled cycles.
         """
-        ny_tz = pytz.timezone(self.config["schedule"]["timezone"])
-        now_et = datetime.now(ny_tz)
-        window = self._monitor_time_window(now_et)
-
-        if window != "MARKET":
+        if not is_market_open_at():
             return
 
         try:
@@ -512,8 +458,26 @@ class TradingAgent:
                 signals.append(ExitSignal(record.ticker, "STOP_LOSS", price, unrealized_pct, record.quantity))
             elif unrealized_pct >= record.take_profit_pct:
                 signals.append(ExitSignal(record.ticker, "PROFIT_TARGET", price, unrealized_pct, record.quantity))
-            elif unrealized_pct >= PositionManager.REVIEW_GAIN_PCT:
-                signals.append(ExitSignal(record.ticker, "PROFIT_REVIEW", price, unrealized_pct, record.quantity))
+            else:
+                # Soft advisories — profit review + max-holding (config-driven,
+                # mirroring PositionManager.check_exits semantics).
+                profit_review = unrealized_pct >= self.position_manager._review_gain_pct
+                try:
+                    days_held = (datetime.now(timezone.utc).date()
+                                 - datetime.fromisoformat(record.entry_date).date()).days
+                except Exception:
+                    days_held = 0
+                max_holding = (
+                    self._monitor_max_hold
+                    and not getattr(record, "reconciled", False)
+                    and days_held > self.position_manager._max_holding_days
+                )
+                if profit_review and max_holding:
+                    signals.append(ExitSignal(record.ticker, "PROFIT_REVIEW+MAX_HOLDING_PERIOD", price, unrealized_pct, record.quantity))
+                elif profit_review:
+                    signals.append(ExitSignal(record.ticker, "PROFIT_REVIEW", price, unrealized_pct, record.quantity))
+                elif max_holding:
+                    signals.append(ExitSignal(record.ticker, "MAX_HOLDING_PERIOD", price, unrealized_pct, record.quantity))
 
         self.logger.info("price_monitor tick open_positions=%d signals=%d", len(open_records), len(signals))
 
@@ -528,7 +492,7 @@ class TradingAgent:
 
         for signal in signals:
             ticker = signal.ticker
-            lock = self._monitor_locks.setdefault(ticker, asyncio.Lock())
+            lock = self.position_manager.lock_for(ticker)  # SHARED with cycles
 
             if ticker in self._exit_in_progress:
                 self.logger.debug("monitor_skip_locked ticker=%s", ticker)
@@ -537,15 +501,13 @@ class TradingAgent:
             # ---- Soft-signal cooldown (PROFIT_REVIEW / PROFIT_TARGET) ----
             # STOP_LOSS is a hard risk rule: never skipped for cooldown.
             # Combined soft reasons (e.g. "PROFIT_REVIEW+MAX_HOLDING_PERIOD")
-            # are treated as soft and use MONITOR_SOFT_COOLDOWN.
+            # are treated as soft and use the longer cooldown.
             if signal.reason != "STOP_LOSS":
                 now_utc = datetime.now(timezone.utc)
                 if "PROFIT_TARGET" in signal.reason:
-                    cooldown = MONITOR_TARGET_COOLDOWN
+                    cooldown = self._monitor_target_cd
                 else:
-                    # PROFIT_REVIEW and any soft combined form fall back to the
-                    # longer cooldown.
-                    cooldown = MONITOR_SOFT_COOLDOWN
+                    cooldown = self._monitor_soft_cd
                 last = self._last_monitor_review.get(ticker)
                 if last is not None and (now_utc - last) < cooldown:
                     remaining = (cooldown - (now_utc - last)).total_seconds()
@@ -563,8 +525,8 @@ class TradingAgent:
                     if record is None:
                         continue
 
-                    # Refresh data appropriate for the current window
-                    metrics, news_list = await self._monitor_refresh_data(ticker, window)
+                    # Refresh data (window arg is log context only now)
+                    metrics, news_list = await self._monitor_refresh_data(ticker, "MARKET")
 
                     decision = await self._evaluate_threshold_signal(
                         signal=signal,
@@ -614,7 +576,7 @@ class TradingAgent:
                         )
                         # Executor already calls record_realized_pnl + record_exit on
                         # EXECUTED / SUBMITTED / WOULD_EXECUTE (dry-run). Do NOT call record_exit again.
-                        if result.status in ("EXECUTED", "SUBMITTED", "WOULD_EXECUTE"):
+                        if result.status in SUCCESS_STATUSES:
                             pnl_map.pop(ticker, None)
                             # Position is closed: clear cooldown timestamp so a
                             # future re-entry starts clean (no stale throttle).
@@ -641,14 +603,8 @@ class TradingAgent:
         cycle_str = cycle_type.value if isinstance(cycle_type, CycleType) else str(cycle_type)
         self.logger.info("=== cycle_start cycle=%s dry_run=%s ===", cycle_str, self.config["env"]["DRY_RUN"])
 
-        try:
-            self.cost_tracker.check_limits(
-                self.config["cost_limits"]["daily_usd_limit"],
-                self.config["cost_limits"]["monthly_usd_limit"],
-            )
-        except CostLimitExceededError as exc:
-            self.logger.error("cycle_aborted cost_limit: %s", exc)
-            return
+        # Cost tracking is OBSERVABILITY ONLY (see utils/cost_tracker.py):
+        # totals are logged at cycle end, trading never halts for spend.
 
         if not self._is_market_open():
             self.logger.info("cycle_skipped market_closed")
@@ -672,6 +628,15 @@ class TradingAgent:
         portfolio = data["portfolio"]
         quotes = data["quotes"]
         historicals = data["historicals"]
+
+        # Stale-data guard: if the calendar says the market is open but SPY
+        # has no usable quote, the data path is unhealthy — skip the cycle
+        # rather than let the model reason over phantom numbers.
+        if bool(self.config.get("trading", {}).get("market_hours", {}).get("stale_data_guard", True)):
+            spy_quote = quotes.get("SPY")
+            if spy_quote is None or float(getattr(spy_quote, "price", 0.0) or 0.0) <= 0:
+                self.logger.warning("cycle_skipped stale_data_guard: SPY quote unavailable while market open")
+                return
 
         # ---- SECTION 1: reconcile live MCP portfolio ⟷ positions.json ----
         self.position_manager.reconcile_with_mcp(portfolio)
@@ -703,14 +668,15 @@ class TradingAgent:
             else:
                 metrics[ticker] = result
 
-        # fix stale current_price from metrics with live quote price
+        # fix stale current_price from metrics with live quote price.
+        # distance_from_20dma is recomputed from the REAL sma_20 value stored
+        # by MetricsEngine — no more reconstructing an SMA from a percentage.
         for ticker, m in metrics.items():
             quote = quotes.get(ticker)
             if quote and quote.price > 0 and m.current_price > 0:
-                sma_20 = m.current_price - (m.current_price * m.distance_from_20dma / 100.0)
                 m.current_price = quote.price
-                if sma_20 != 0:
-                    m.distance_from_20dma = ((quote.price - sma_20) / sma_20) * 100.0
+                if m.sma_20 > 0:
+                    m.distance_from_20dma = ((quote.price - m.sma_20) / m.sma_20) * 100.0
 
         spy_m = metrics.get("SPY")
         spy_context = ""
@@ -750,7 +716,9 @@ class TradingAgent:
         # into every single ticker's prompt.
         pnl_map = self.position_manager.open_positions_pnl_map(quotes)
 
-        # Process exit signals (hard stops)
+        # Process exit signals (hard stops) — under the SHARED per-ticker
+        # locks so the 15-second monitor can never race this same holding.
+        closed_this_cycle: set[str] = set()
         for signal in exit_signals:
             ticker = signal.ticker
             quote = quotes.get(ticker)
@@ -787,11 +755,20 @@ class TradingAgent:
             except Exception:
                 pass
             if exit_decision.decision == DecisionType.SELL:
-                result = await self.executor.execute(exit_decision, portfolio, current_price, dry_run=self.config["env"]["DRY_RUN"], vol_30d=metrics.get(ticker).realized_vol_30d if metrics.get(ticker) else 0.0, avg_volume_30d=metrics.get(ticker).avg_volume_30d if metrics.get(ticker) else 0.0, realized_vol_30d=metrics.get(ticker).realized_vol_30d if metrics.get(ticker) else 0.0)
-                if result.status in ("EXECUTED", "SUBMITTED", "WOULD_EXECUTE"):
+                async with self.position_manager.lock_for(ticker):
+                    result = await self.executor.execute(exit_decision, portfolio, current_price, dry_run=self.config["env"]["DRY_RUN"], vol_30d=metrics.get(ticker).realized_vol_30d if metrics.get(ticker) else 0.0, avg_volume_30d=metrics.get(ticker).avg_volume_30d if metrics.get(ticker) else 0.0, realized_vol_30d=metrics.get(ticker).realized_vol_30d if metrics.get(ticker) else 0.0)
+                if result.status in SUCCESS_STATUSES:
                     effective_buying_power += signal.quantity * current_price
-                    effective_positions_count -= 1
+                    effective_positions_count = max(0, effective_positions_count - 1)  # clamp (never negative)
+                    closed_this_cycle.add(ticker)
                     pnl_map.pop(ticker, None)
+
+        # Refresh AFTER exits: Path A/B must never re-review a position that
+        # was already closed this cycle (kills phantom double reviews,
+        # wasted LLM calls, and double-sell windows).
+        if closed_this_cycle:
+            open_records = self.position_manager.get_open_records()
+            existing_tickers = [r.ticker for r in open_records]
 
         # ---- SECTION 2: Path A (held) + Path B (non-held) ----
         #
@@ -857,10 +834,12 @@ class TradingAgent:
                 pass
 
             if routine_decision.decision == DecisionType.SELL:
-                result = await self.executor.execute(routine_decision, portfolio, current_price, dry_run=self.config["env"]["DRY_RUN"], vol_30d=metrics.get(ticker).realized_vol_30d if metrics.get(ticker) else 0.0, avg_volume_30d=metrics.get(ticker).avg_volume_30d if metrics.get(ticker) else 0.0, realized_vol_30d=metrics.get(ticker).realized_vol_30d if metrics.get(ticker) else 0.0)
-                if result.status in ("EXECUTED", "SUBMITTED", "WOULD_EXECUTE"):
+                async with self.position_manager.lock_for(ticker):
+                    result = await self.executor.execute(routine_decision, portfolio, current_price, dry_run=self.config["env"]["DRY_RUN"], vol_30d=metrics.get(ticker).realized_vol_30d if metrics.get(ticker) else 0.0, avg_volume_30d=metrics.get(ticker).avg_volume_30d if metrics.get(ticker) else 0.0, realized_vol_30d=metrics.get(ticker).realized_vol_30d if metrics.get(ticker) else 0.0)
+                if result.status in SUCCESS_STATUSES:
                     effective_buying_power += record.quantity * current_price
-                    effective_positions_count -= 1
+                    effective_positions_count = max(0, effective_positions_count - 1)
+                    closed_this_cycle.add(ticker)
                     pnl_map.pop(ticker, None)
                     # record_exit is already performed inside ExecutionEngine.execute on SELL fill.
                     # Do not call record_exit again here.
@@ -884,21 +863,35 @@ class TradingAgent:
                 open_positions_pnl=pnl_map,
             )
             mm = metrics.get(ticker)
-            result = await self.executor.execute(
-                decision,
-                portfolio,
-                current_price,
-                dry_run=self.config["env"]["DRY_RUN"],
-                vol_30d=mm.realized_vol_30d if mm else 0.0,
-                avg_volume_30d=mm.avg_volume_30d if mm else 0.0,
-                realized_vol_30d=mm.realized_vol_30d if mm else 0.0,
-            )
+            # ROTATE touches the HELD rotate_from position — take that ticker's
+            # shared lock so the monitor can never fire mid-swap.
+            if decision.decision == DecisionType.ROTATE and decision.rotate_from_ticker:
+                async with self.position_manager.lock_for(decision.rotate_from_ticker):
+                    result = await self.executor.execute(
+                        decision,
+                        portfolio,
+                        current_price,
+                        dry_run=self.config["env"]["DRY_RUN"],
+                        vol_30d=mm.realized_vol_30d if mm else 0.0,
+                        avg_volume_30d=mm.avg_volume_30d if mm else 0.0,
+                        realized_vol_30d=mm.realized_vol_30d if mm else 0.0,
+                    )
+            else:
+                result = await self.executor.execute(
+                    decision,
+                    portfolio,
+                    current_price,
+                    dry_run=self.config["env"]["DRY_RUN"],
+                    vol_30d=mm.realized_vol_30d if mm else 0.0,
+                    avg_volume_30d=mm.avg_volume_30d if mm else 0.0,
+                    realized_vol_30d=mm.realized_vol_30d if mm else 0.0,
+                )
             # Journal AFTER execute so fill_price can come from the fill
             # (matching positions.json). For IGNORE/HOLD fill_price is null.
             try:
                 key_metrics = mm.model_dump(mode="json") if mm and hasattr(mm, "model_dump") else {}
                 fill_price_for_journal = None
-                if result.status in ("EXECUTED", "SUBMITTED", "WOULD_EXECUTE") and result.fill_price:
+                if result.status in SUCCESS_STATUSES and result.fill_price:
                     fill_price_for_journal = float(result.fill_price)
                 entry = JournalEntry(
                     timestamp=datetime.now(timezone.utc).isoformat(),
@@ -912,27 +905,65 @@ class TradingAgent:
                     fill_price=fill_price_for_journal,
                     unrealized_pnl_pct=None,
                     earnings_flag=self._earnings_flag(ticker),
+                    rotated_from=result.rotate_from_ticker if decision.decision == DecisionType.ROTATE else None,
                 )
                 self.journal_manager.append(ticker, entry)
+                # Rotation writes a second, mirrored entry onto the OLD ticker
+                # so its journal records exactly why it left the book.
+                if (
+                    decision.decision == DecisionType.ROTATE
+                    and result.rotate_from_ticker
+                    and result.status in SUCCESS_STATUSES
+                ):
+                    exit_entry = JournalEntry(
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                        cycle_type=cycle_str,
+                        bull_thesis=decision.bull_thesis,
+                        bear_thesis=decision.bear_thesis,
+                        decision="ROTATED_OUT",
+                        decision_rationale=decision.reasoning_summary,
+                        key_metrics={},
+                        news_used=news.get(result.rotate_from_ticker, []),
+                        fill_price=result.rotate_sell_price or None,
+                        unrealized_pnl_pct=None,
+                        earnings_flag=self._earnings_flag(result.rotate_from_ticker),
+                        rotated_to=ticker,
+                    )
+                    self.journal_manager.append(result.rotate_from_ticker, exit_entry)
             except Exception:
                 pass
-            if result.status in ("EXECUTED", "WOULD_EXECUTE"):
-                if decision.decision in (DecisionType.BUY, DecisionType.ROTATE):
-                    size_pct = ExecutionEngine._size_from_edge(
-                        decision.edge.total,
-                        self.config.get("trading", {}).get("max_position_pct", 0.08),
-                    )
+            if result.status in SUCCESS_STATUSES:
+                if decision.decision == DecisionType.BUY:
+                    size_pct = self.executor._size_from_edge(decision.edge.total)
                     effective_buying_power -= size_pct * portfolio.total_value
                     effective_positions_count += 1
                     # newly opened this cycle — 0% unrealized, so the very
                     # next Path B ticker's roster line already knows about it
                     pnl_map[ticker] = 0.0
+                elif decision.decision == DecisionType.ROTATE:
+                    # Rotation is COUNT-NEUTRAL: the sell leg freed the slot
+                    # the buy leg consumed. Cash reflects both real legs:
+                    # sell proceeds IN (rotate_sell_price × sold qty captured
+                    # on the result) and the buy notional OUT.
+                    effective_buying_power += (
+                        (result.rotate_sell_price or 0.0) * (result.rotate_sell_quantity or 0.0)
+                    )
+                    effective_buying_power -= (result.fill_price or 0.0) * (result.quantity or 0.0)
+                    if result.rotate_from_ticker:
+                        pnl_map.pop(result.rotate_from_ticker, None)
+                        pnl_map[ticker] = 0.0
 
         # ---- End of cycle: write open-position unrealized marks (no extra API) ----
         try:
             self.position_manager.write_performance_snapshot(quotes)
         except Exception as exc:
             self.logger.warning("end_of_cycle_performance_snapshot_failed: %s", exc)
+
+        # Cost tracking is informational (never gating): log the totals.
+        self.logger.info(
+            "cycle_complete cycle=%s spend_today=$%.4f spend_month=$%.4f",
+            cycle_str, self.cost_tracker.daily_total(), self.cost_tracker.monthly_total(),
+        )
 
     async def _run_attribution_report(self) -> None:
         report_path = Path(__file__).resolve().parent / "logs" / f"attribution_report_{datetime.now(timezone.utc).date().isoformat()}.json"
@@ -985,16 +1016,17 @@ class TradingAgent:
     async def start(self) -> None:
         configure_logging(level=self.config.get("logging", {}).get("level", "INFO"))
         self.logger.info("agent_start dry_run=%s", self.config["env"]["DRY_RUN"])
+        # Loud, unmistakable mode banner — the ONLY switch is settings.json.
         if self.config["env"]["DRY_RUN"]:
-            self.logger.warning(
-                "*** DRY_RUN ACTIVE - no live orders will be placed. "
-                "(set trading.dry_run=false in config/settings.json to enable live trading) ***"
-            )
+            self.logger.info("=" * 60)
+            self.logger.info("*** DRY-RUN MODE — orders are simulated only ***")
+            self.logger.info("*** Switch execution.dry_run to false in settings.json to go live ***")
+            self.logger.info("=" * 60)
         else:
-            self.logger.warning(
-                "*** LIVE TRADING ENABLED - real orders will be placed "
-                "against your Robinhood account ***"
-            )
+            self.logger.info("=" * 60)
+            self.logger.info("*** LIVE TRADING MODE — execution.dry_run=false in settings.json ***")
+            self.logger.info("*** Real orders WILL be placed through Robinhood. ***")
+            self.logger.info("=" * 60)
 
         schedule = self.config.get("schedule", {})
         open_h = int(schedule.get("open_hour", 9))
@@ -1018,19 +1050,23 @@ class TradingAgent:
             day_of_week="mon-fri", hour=close_h, minute=close_m, timezone=tz_name,
         )
 
-        # --- 1-minute price monitor (section 7) ---
-        self.scheduler.add_job(
-            self.run_price_monitor, "cron",
-            day_of_week="mon-fri", hour="9-15", minute="*",
-            timezone=tz_name,
-            max_instances=1, coalesce=True,
-        )
-        self.scheduler.add_job(
-            self.run_price_monitor, "cron",
-            day_of_week="mon-fri", hour=16, minute="0",
-            timezone=tz_name,
-            max_instances=1, coalesce=True,
-        )
+        # --- Config-speed price monitor (interval from settings.json) ---
+        # Cron seconds field so the tick can be faster than 1 minute
+        # (monitor.interval_seconds, default 15). Two jobs keep the tick
+        # pinned to the 09:30–16:00 window; the NYSE-calendar gate inside
+        # run_price_monitor pre-empts anything stale (holidays, half-days).
+        mon_cfg = self.config.get("monitor", {})
+        if bool(mon_cfg.get("enabled", True)):
+            interval_s = max(5, int(mon_cfg.get("interval_seconds", 15)))
+            second_spec = f"*/{interval_s}" if interval_s < 60 else "*"
+            for hour_spec, minute_spec in (("9-15", "*"), ("16", "0")):
+                self.scheduler.add_job(
+                    self.run_price_monitor, "cron",
+                    day_of_week="mon-fri", hour=hour_spec, minute=minute_spec,
+                    second=second_spec, timezone=tz_name,
+                    max_instances=1, coalesce=True,
+                )
+            self.logger.info("monitor_registered interval_seconds=%d", interval_s)
         # --- Weekly sentiment ticker selection job (feature-flagged) ---
         try:
             selector = await self._get_weekly_selector()
@@ -1048,6 +1084,20 @@ class TradingAgent:
                         )
         except Exception as exc:
             self.logger.error("weekly_scheduler_setup_failed: %s", exc)
+
+        # --- Daily attribution report (fix: previously defined but never scheduled) ---
+        rep_cfg = self.config.get("reporting", {})
+        if bool(rep_cfg.get("attribution_enabled", True)):
+            self.scheduler.add_job(
+                self._run_attribution_report, "cron",
+                day_of_week="mon-fri",
+                hour=int(rep_cfg.get("attribution_hour", 16)),
+                minute=int(rep_cfg.get("attribution_minute", 5)),
+                timezone=tz_name, max_instances=1, coalesce=True,
+            )
+            self.logger.info("attribution_report_registered at=%02d:%02d ET",
+                             int(rep_cfg.get("attribution_hour", 16)),
+                             int(rep_cfg.get("attribution_minute", 5)))
 
         self.scheduler.start()
 

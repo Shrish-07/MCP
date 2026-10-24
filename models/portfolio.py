@@ -14,6 +14,9 @@ class PositionRecord(BaseModel):
     take_profit_pct: float = 0.20
     quantity: float = 0.0
     order_id: str = ""
+    reconciled: bool = False  # True = added by reconcile (not by our own fill);
+                              # skips max-holding advisories until the next full
+                              # cycle computes its vol-adjusted stop.
 
 
 class Position(BaseModel):

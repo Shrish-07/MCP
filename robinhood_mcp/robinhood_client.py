@@ -26,8 +26,8 @@ WHAT STAYS IDENTICAL:
     models), and every piece of business logic for cleaning up Robinhood's
     response shapes (string-to-float coercion, nested buying_power
     extraction, quote/historicals field remapping) is preserved exactly
-    as validated in the previous version. Callers in core/data_ingest.py,
-    core/execution.py, and elsewhere do not need to change.
+    as validated in the previous version. Callers in core/data/ingest.py,
+    core/execution/engine.py, and elsewhere do not need to change.
 
 WHAT'S NEW AND IMPORTANT:
     - Direct calls require `account_number` as an explicit argument for
@@ -167,11 +167,12 @@ class RobinhoodMCPClient:
     cached and refreshed automatically across runs.
     """
 
-    def __init__(self, mcp_url: str | None = None) -> None:
+    def __init__(self, url: str | None = None) -> None:
         self.logger = logging.getLogger("robinhood-agent.mcp")
         self.max_retries = 3
-        # Configurable via config/settings.json -> robinhood.mcp_url
-        self._mcp_url = mcp_url or ROBINHOOD_MCP_URL
+        # Server URL now comes from config/settings.json → execution.mcp_url;
+        # the built-in constant remains the default if callers pass nothing.
+        self.url = (url or ROBINHOOD_MCP_URL).strip() or ROBINHOOD_MCP_URL
         self._cached_account_number: str = ""
         self._token_cache: dict[str, Any] = {}
         self._token_lock = asyncio.Lock()
@@ -384,7 +385,7 @@ class RobinhoodMCPClient:
                 access_token = await self._ensure_valid_token()
                 headers = {"Authorization": f"Bearer {access_token}"}
 
-                async with streamablehttp_client(self._mcp_url, headers=headers, timeout=30) as (read, write, _sid):
+                async with streamablehttp_client(self.url, headers=headers, timeout=30) as (read, write, _sid):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         result = await session.call_tool(tool_name, arguments)

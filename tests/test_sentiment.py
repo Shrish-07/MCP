@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from core.sentiment_model import get_sentiment_model, score_single_headline
+from core.data.sentiment import get_sentiment_model, score_single_headline
 
 # These tests download a large Hugging Face model (~hundreds of MB) and are
 # therefore excluded from the default run and from CI. Run explicitly with:

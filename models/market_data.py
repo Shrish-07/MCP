@@ -26,6 +26,7 @@ class MarketMetrics(BaseModel):
     drawdown_30d: float = 0.0
     closes_above_20dma: int = 0
     distance_from_20dma: float = 0.0
+    sma_20: float = 0.0
     avg_volume_7d: float = 0.0
     avg_volume_30d: float = 0.0
     volume_spike_pct: float = 0.0
