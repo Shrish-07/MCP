@@ -1014,7 +1014,7 @@ class TradingAgent:
         report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     async def start(self) -> None:
-        configure_logging()
+        configure_logging(level=self.config.get("logging", {}).get("level", "INFO"))
         self.logger.info("agent_start dry_run=%s", self.config["env"]["DRY_RUN"])
         # Loud, unmistakable mode banner — the ONLY switch is settings.json.
         if self.config["env"]["DRY_RUN"]:

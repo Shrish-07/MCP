@@ -60,7 +60,11 @@ Key design decisions baked into the code:
 robinhood-agent/
 ├── main.py                     # Entry point. TradingAgent: config, scheduler, cycles, monitor.
 ├── README.md                   # This file.
-├── requirements.txt            # Dependency pin list (note: UTF-16 encoded).
+├── requirements.txt            # Core runtime dependency pins.
+├── requirements-ml.txt         # Optional ML extra (torch/transformers) — only for sentiment selection.
+├── requirements-dev.txt        # Dev/test tooling (pytest, pytest-asyncio, ruff).
+├── CONTRIBUTING.md             # Contribution rules, dev setup, test commands.
+├── SECURITY.md                 # Security policy + local-data inventory.
 ├── .env                        # Secrets ONLY (ANTHROPIC_API_KEY, FINNHUB_API_KEY). Not committed.
 ├── .env.example                # Template for the secrets above.
 │
@@ -116,12 +120,14 @@ robinhood-agent/
 │   ├── smoke_cycle.py          # One-shot live cycle smoke test (honors dry-run).
 │   └── verify_weekly_layer.py  # Offline-deterministic weekly-layer verification.
 │
-├── tests/                      # Offline test suite (57 tests): config loader, cost tracker,
+├── tests/                      # Offline test suite (55 by default / 57 including the 2
+│                               #   heavy model-download tests): config loader, cost tracker,
 │                               #   execution guards, parsing, position logic, rotation,
 │                               #   sentiment, ticker selector, weekly e2e.
 │
+├── .github/                    # CI (tests + gitleaks secret scan), CODEOWNERS, PR template.
+│
 ├── archive/                    # Quarantined legacy/one-off artifacts (not on the import path).
-│   ├── robinhood_client(claude version).py  # Older CLI subprocess client — legacy/unused.
 │   ├── mcp_deep_schema_dump.py # One-time MCP tool-schema enumeration (dev aid).
 │   ├── mcp_diagnostic_v2.py    # Standalone OAuth+MCP connectivity probe.
 │   └── smoke_out.txt           # Raw output of the one-shot smoke run.
@@ -379,6 +385,28 @@ All state lives under `logs/` and `journals/` (auto-created by the app).
 
 ---
 
+## Where Your Data Lives (per-user state)
+
+Everything the agent records is **local to your machine** and private to you. It is generated at runtime, unique per user, and **git-ignored** so it can never be pushed to a remote:
+
+| Path | Created by | Git status |
+|---|---|---|
+| `logs/positions.json`, `logs/trades.json`, `logs/performance.json`, `logs/agent.log`, `logs/cost_tracker.json`, `logs/*.jsonl` (MCP traces) | `PositionManager`, `ExecutionEngine`, `utils/logger.py`, `CostTracker`, `response_recorder` | ignored |
+| `journals/<TICKER>.json` | `JournalManager` | ignored |
+| `data/seen_headlines.json`, `data/earnings_calendar.json`, `data/selected_universe.json`, `data/weekly_news_cache.json` | `NewsFetcher`, `EarningsCalendar`, `WeeklySelector`, `WeeklyNewsFetcher` | ignored |
+| `.rh_oauth_cache.json` | `RobinhoodMCPClient` (Robinhood OAuth tokens) | ignored |
+| `.env` | you (API keys) | ignored |
+
+A fresh clone recreates all of these automatically on first run — nothing in the repository ships with pre-existing trading history, journals, or traces. See [SECURITY.md](SECURITY.md) for why the MCP trace files (which contain real account numbers) must never be committed.
+
+## Security & Contributing
+
+- Security policy and the full local-data inventory: [SECURITY.md](SECURITY.md)
+- Contribution rules, dev setup, test commands, and the never-commit list: [CONTRIBUTING.md](CONTRIBUTING.md)
+- CI (`.github/workflows/ci.yml`) runs the test suite, the offline verification harness, and a **gitleaks secret scan** on every pull request; changes to `main` require the code owner's approval (`.github/CODEOWNERS`).
+
+---
+
 ## Cost Tracking
 
 `utils/cost_tracker.py` meters every Anthropic call — a singleton, so totals are shared process-wide. It is **observability only**: it will never stop, gate, or change trading behaviour for any level of spend.
@@ -452,7 +480,7 @@ dry-run ON. Key sections:
 
 1. **Python 3.11+** (the code uses modern typing / async).
 2. Create a virtual environment and activate it.
-3. Install dependencies: `pip install -r requirements.txt` (includes `anthropic`, `apscheduler>=3.11`, `httpx`, `mcp`, `pydantic`, `pytz`, `python-dotenv`, `uvicorn`, `pandas-market-calendars`, and the ML stack `torch`/`transformers` for the weekly sentiment selector). For tests also: `pip install pytest pytest-asyncio`.
+3. Install dependencies: `pip install -r requirements.txt` (includes `anthropic`, `apscheduler>=3.11`, `httpx`, `mcp`, `pydantic`, `pytz`, `python-dotenv`, `uvicorn`, `pandas-market-calendars`). Add `pip install -r requirements-ml.txt` **only** if you enable weekly sentiment selection (it pulls the ~2 GB `torch`/`transformers` stack), and `pip install -r requirements-dev.txt` for the test suite (`pytest`, `pytest-asyncio`, `ruff`).
 4. Create `.env` with `ANTHROPIC_API_KEY` and `FINNHUB_API_KEY` (secrets only — see `.env.example`).
 5. Review `config/settings.json` — it ships with `execution.dry_run: true` (simulate only). Every toggle lives there.
 6. **(First run only)** Authenticate with Robinhood — the app opens the browser for the one-time OAuth approval; a `.rh_oauth_cache.json` is then reused/silently refreshed on later runs. Requires an active Robinhood **Agentic** account configured to allow (`agentic_allowed=true`).

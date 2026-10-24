@@ -1,13 +1,23 @@
+# ---- secrets (NEVER commit) ----
 .env
-.venv/
-__pycache__/
-*.pyc
-logs/*.log
-logs/*.json
-logs/*.jsonl
-logs/*.gz
 .rh_oauth_cache.json
 
-# Weekly sentiment selection: runtime state (regenerated each run)
+# ---- per-user runtime state (auto-created at runtime; unique to each user) ----
+logs/
+journals/
+data/seen_headlines.json
+data/earnings_calendar.json
 data/selected_universe.json
 data/weekly_news_cache.json
+
+# ---- local tool state ----
+.claude/settings.local.json
+.vscode/
+.idea/
+
+# ---- python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/

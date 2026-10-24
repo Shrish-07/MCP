@@ -25,17 +25,14 @@ WHAT CHANGED FROM v1:
 SAFETY: identical guarantees as v1. FORBIDDEN_TOOLS (all order-placing tools)
 are never called under any circumstance. This script is read-only.
 
-HOW TO RUN:
-  1. cd C:\\Users\\Shris\\OneDrive\\Desktop\\Project\\S-BOT\\robinhood-agent
-  2. venv\\Scripts\\activate
-  3. Save this file as mcp_diagnostic_v2.py in that folder
-  4. python mcp_diagnostic_v2.py
-  5. A browser window will open asking you to log into Robinhood and approve
-     access — this is the SAME kind of one-time approval you did for Claude
-     Code originally, just now for a plain Python script instead.
-  6. After approving in the browser, come back to the terminal — the script
+HOW TO RUN (from the project root):
+  1. Activate your virtual environment (e.g. .venv\\Scripts\\activate)
+  2. python archive/mcp_diagnostic_v2.py
+  3. A browser window will open asking you to log into Robinhood and approve
+     access — this is the same kind of one-time approval you would do for
+     Claude Code, just now for a plain Python script instead.
+  4. After approving in the browser, come back to the terminal — the script
      will detect the redirect automatically and continue.
-  7. Copy the FULL terminal output and paste it back into chat.
 """
 
 from __future__ import annotations
@@ -56,9 +53,8 @@ from pathlib import Path
 from urllib.parse import urlencode, urlparse, parse_qs
 
 # ---------------------------------------------------------------------------
-# CRITICAL FIX: remove the current script's directory (and cwd) from sys.path
-# BEFORE importing mcp, so the real installed PyPI package is found instead
-# of this project's own local mcp/ folder.
+# Safety: remove the current script's directory (and cwd) from sys.path
+# BEFORE importing mcp, so the real installed PyPI package is always found.
 # ---------------------------------------------------------------------------
 _this_dir = str(Path(__file__).resolve().parent)
 sys.path = [p for p in sys.path if os.path.abspath(p or ".") != _this_dir]
@@ -72,7 +68,7 @@ TOKEN_ENDPOINT = "https://api.robinhood.com/oauth2/token/"
 REDIRECT_PORT = 53271  # arbitrary local port for the OAuth redirect catcher
 REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/callback"
 
-TOKEN_CACHE_PATH = Path(__file__).resolve().parent / ".rh_oauth_cache.json"
+TOKEN_CACHE_PATH = Path(__file__).resolve().parent.parent / ".rh_oauth_cache.json"
 
 FORBIDDEN_TOOLS = {
     "place_equity_order", "place_option_order",

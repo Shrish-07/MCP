@@ -71,7 +71,7 @@
   - Robinhood OAuth → cached in `.rh_oauth_cache.json` (auto-managed)
   - Anthropic API key → via `ANTHROPIC_API_KEY` env var (used by `anthropic.AsyncAnthropic()`)
   - `DRY_RUN` → in `config["env"]["DRY_RUN"]`
-- **No .env.example file exists**
+- **`.env.example` exists** — secrets only (the two API keys); every other setting lives in `config/settings.json`
 
 ## 11. Key Integration Points for New Ticker Selection Layer
 - **Replace watchlist source**: `TradingAgent.run_cycle()` reads from config → needs to read dynamic list

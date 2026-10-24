@@ -10,6 +10,9 @@
     "tradability_fail_mode": "closed",
     "min_dollar_volume": 75000000
   },
+  "logging": {
+    "level": "INFO"
+  },
   "trading": {
     "max_positions": 12,
     "max_position_pct": 0.08,

@@ -17,7 +17,7 @@ ARCHITECTURE CHANGE FROM PREVIOUS VERSION:
     PKCE flow against Robinhood's own published endpoints. Zero LLM calls,
     zero subprocess, zero token cost anywhere in this file. This was
     validated end-to-end against the real Robinhood MCP server and a real
-    $2,000 Agentic account before this rewrite was written — every phase
+    Agentic account before this rewrite was written — every phase
     (registration, browser auth, token refresh, tool discovery, and a live
     get_portfolio call returning real account data) passed.
 

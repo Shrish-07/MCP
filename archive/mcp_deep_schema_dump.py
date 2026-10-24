@@ -7,10 +7,11 @@ import sys
 from pathlib import Path
 
 # This MUST be the first executable code in the file, before any local
-# project imports. It guarantees the project root (where this script and
-# the robinhood_mcp/ package both live) is at the very front of the
-# import search path, regardless of anything else that could interfere.
-_PROJECT_ROOT = str(Path(__file__).resolve().parent)
+# project imports. It guarantees the project root (the parent of this
+# script's archive/ directory, where the robinhood_mcp/ package lives) is
+# at the very front of the import search path, regardless of anything
+# else that could interfere.
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
