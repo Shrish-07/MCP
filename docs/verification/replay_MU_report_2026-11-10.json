@@ -1,0 +1,149 @@
+{
+  "schema_version": 2,
+  "mode": "paper",
+  "day_et": "2026-11-10",
+  "generated_at": "2026-11-10T20:29:24.919771+00:00",
+  "metrics": {
+    "closed_positions": 1,
+    "known_cost_positions": 1,
+    "unknown_cost_positions": 0,
+    "gross_expectancy": -785.5977493149987,
+    "net_expectancy_known_cost_subset": -785.5977493149987,
+    "gross_win_rate": 0.0,
+    "win_rate_wilson_95pct": [
+      0.0,
+      0.7934567085261071
+    ],
+    "average_gross_win": null,
+    "average_gross_loss": -785.5977493149987,
+    "gross_expectancy_approx_95pct": null
+  },
+  "closed_positions": [
+    {
+      "position_id": "f5a2bd7e-193f-4d5e-95fb-a6e40f509f6c",
+      "ticker": "REPLAY",
+      "closed_at": "2026-07-22T13:37:37.229190+00:00",
+      "entry_at": "2026-07-14T19:31:59.781592+00:00",
+      "entry_snapshot_id": "paper-entry:cumulative:10.0000000000",
+      "fill_ids": [
+        "paper-entry:cumulative:10.0000000000",
+        "paper-exit:cumulative:3.0000000000",
+        "paper-exit:cumulative:6.0000000000",
+        "paper-exit:cumulative:9.0000000000",
+        "paper-exit:cumulative:10.0000000000"
+      ],
+      "gross_realized_pnl": -785.5977493149987,
+      "net_realized_pnl": -785.5977493149987,
+      "fees_status": "known",
+      "slippage_dollars": -99.14700068499997,
+      "mfe_pct": 4.712561893552403,
+      "mae_pct": -9.577946314253271,
+      "history_complete": true,
+      "lot_excursions": [
+        {
+          "lot_id": "paper-entry:cumulative:10.0000000000",
+          "mfe_pct": 4.712561893552403,
+          "mae_pct": -9.577946314253271
+        }
+      ],
+      "exit_reason": "HARD_STOP 872.717115",
+      "entry_archetype": null,
+      "gap_decile": null,
+      "entry_features": {},
+      "adds": 0,
+      "holding_calendar_days": 7.753905643495371,
+      "holding_trading_sessions": 5
+    }
+  ],
+  "today_closed_positions": [],
+  "confirmed_fill_count": 5,
+  "active_orders": [],
+  "gross_realized_fill_pnl": -785.5977493149987,
+  "by_entry_and_exit": {
+    "entry_archetype": {
+      "None": {
+        "closed_positions": 1,
+        "known_cost_positions": 1,
+        "unknown_cost_positions": 0,
+        "gross_expectancy": -785.5977493149987,
+        "net_expectancy_known_cost_subset": -785.5977493149987,
+        "gross_win_rate": 0.0,
+        "win_rate_wilson_95pct": [
+          0.0,
+          0.7934567085261071
+        ],
+        "average_gross_win": null,
+        "average_gross_loss": -785.5977493149987,
+        "gross_expectancy_approx_95pct": null
+      }
+    },
+    "gap_decile": {
+      "None": {
+        "closed_positions": 1,
+        "known_cost_positions": 1,
+        "unknown_cost_positions": 0,
+        "gross_expectancy": -785.5977493149987,
+        "net_expectancy_known_cost_subset": -785.5977493149987,
+        "gross_win_rate": 0.0,
+        "win_rate_wilson_95pct": [
+          0.0,
+          0.7934567085261071
+        ],
+        "average_gross_win": null,
+        "average_gross_loss": -785.5977493149987,
+        "gross_expectancy_approx_95pct": null
+      }
+    },
+    "exit_reason": {
+      "HARD_STOP 872.717115": {
+        "closed_positions": 1,
+        "known_cost_positions": 1,
+        "unknown_cost_positions": 0,
+        "gross_expectancy": -785.5977493149987,
+        "net_expectancy_known_cost_subset": -785.5977493149987,
+        "gross_win_rate": 0.0,
+        "win_rate_wilson_95pct": [
+          0.0,
+          0.7934567085261071
+        ],
+        "average_gross_win": null,
+        "average_gross_loss": -785.5977493149987,
+        "gross_expectancy_approx_95pct": null
+      }
+    }
+  },
+  "exposure_dollars": null,
+  "turnover_fraction": null,
+  "drawdown": null,
+  "drawdown_basis": "observed broker account equity; unadjusted for deposits/withdrawals; incomplete history",
+  "exposure_fraction": null,
+  "marked_open_pnl": null,
+  "benchmark_relative_performance": null,
+  "data_quality": {
+    "legacy_history": "incomplete unless confirmed fill and valid marks exist",
+    "drawdown": "requires complete equity history",
+    "benchmark": "requires aligned benchmark and cash-flow history"
+  },
+  "interpretation": "Available sample and uncertainty only; profitability and discovery lift are unestablished.",
+  "stop_path": [
+    872.717115,
+    872.717115,
+    872.717115,
+    872.717115,
+    872.717115,
+    872.717115,
+    872.717115,
+    872.717115,
+    872.717115,
+    872.717115,
+    872.717115,
+    872.717115
+  ],
+  "limitations": "Sparse archived journal observations, not continuous quotes, actual account holdings or a return forecast; ATR unavailable.",
+  "source": {
+    "ticker": "MU",
+    "observations": 90,
+    "first": "2026-07-14T19:31:59.781592+00:00",
+    "last": "2026-08-20T19:31:24.332467+00:00"
+  }
+}

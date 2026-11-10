@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from enum import Enum
-from pydantic import BaseModel, Field
+from uuid import uuid4
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
 class DecisionType(str, Enum):
@@ -10,11 +11,12 @@ class DecisionType(str, Enum):
     HOLD = "HOLD"
     IGNORE = "IGNORE"
     ROTATE = "ROTATE"
+    ADD_TO_POSITION = "ADD_TO_POSITION"
 
 
 # Canonical success statuses — single definition, imported by main.py.
-# "SUBMITTED" is included: a submitted live order is ownership-in-progress.
-SUCCESS_STATUSES = ("EXECUTED", "SUBMITTED", "WOULD_EXECUTE")
+# Submissions and previews are not confirmed ownership or closure.
+SUCCESS_STATUSES = ("FILLED", "EXECUTED")
 
 # Canonical exit-review rubric — single definition, shared by
 # core/decision/engine.py (cycles) and main.py (monitor path).
@@ -44,6 +46,7 @@ class StructuredEdgeScore(BaseModel):
     Claude outputs all three. Code computes total. No faking.
     """
 
+    model_config=ConfigDict(allow_inf_nan=False)
     catalyst_strength: float = Field(
         0.0,
         ge=0.0,
@@ -100,9 +103,50 @@ class JournalEntry(BaseModel):
     earnings_flag: bool = False
     rotated_from: str | None = None
     rotated_to: str | None = None
+    event_id: str | None = None
+    mode: str = "legacy_unknown"
+    decision_id: str | None = None
+    position_id: str | None = None
+    order_id: str | None = None
+    entry_price: float | None = None
+
+
+class AddThesis(BaseModel):
+    model_config=ConfigDict(extra="forbid",strict=True,allow_inf_nan=False)
+    existing_position_confirmed: bool
+    thesis_still_valid: bool
+    validity_evidence: str = Field(min_length=20)
+    new_evidence: str = Field(min_length=20)
+    original_thesis: str = Field(min_length=20)
+    incremental_thesis: str = Field(min_length=20)
+    original_invalidation: list[str] = Field(min_length=1)
+    incremental_invalidation: list[str] = Field(min_length=1)
+    mispricing_catalyst: str = Field(min_length=20)
+    why_market_may_be_wrong: str = Field(min_length=20)
+    horizon_trading_sessions: int = Field(ge=2,le=60)
+    base_return_pct: float
+    upside_return_pct: float
+    downside_return_pct: float
+    risks_and_events: list[str] = Field(min_length=1)
+    not_averaging_down_reason: str = Field(min_length=20)
+    requested_increment_pct: float = Field(gt=0,le=1)
+    incremental_risk_dollars: float = Field(ge=0)
+    aggregate_risk_dollars: float = Field(ge=0)
+    alternatives: dict[str,str]
+    evidence_ids: list[str] = Field(min_length=1)
+    data_timestamps: dict[str,str]
+
+    @model_validator(mode="after")
+    def coherent(self):
+        if set(self.alternatives)!={"HOLD","SELL","ROTATE"} or any(len(v.strip())<10 for v in self.alternatives.values()):
+            raise ValueError("HOLD/SELL/ROTATE comparisons required")
+        if not self.downside_return_pct < self.base_return_pct < self.upside_return_pct or self.downside_return_pct>=0:
+            raise ValueError("contradictory return scenarios")
+        return self
 
 
 class TradeDecision(BaseModel):
+    decision_id: str = Field(default_factory=lambda: str(uuid4()))
     ticker: str = Field(..., min_length=1)
     bull_thesis: str = ""
     bear_thesis: str = ""
@@ -117,6 +161,9 @@ class TradeDecision(BaseModel):
     reasoning_summary: str = ""
     timestamp: str = ""
     cycle_type: str = ""
+    evidence: dict = Field(default_factory=dict)
+    add_thesis: AddThesis | None = None
+    portfolio_review: dict[str,str] = Field(default_factory=dict)
 
     @property
     def edge_score(self) -> float:
@@ -133,6 +180,11 @@ class ExecutionResult(BaseModel):
     timestamp: str = ""
     dry_run: bool = True
     side: str = ""
+    filled_quantity: float | None = None
+    fills: list[dict] = Field(default_factory=list)
+    fees: float | None = None
+    raw_order: dict = Field(default_factory=dict)
+    decision_id: str = ""
     # Two-leg rotation metadata (populated when a ROTATE decision executed):
     rotate_from_ticker: str | None = None
     rotate_sell_price: float = 0.0

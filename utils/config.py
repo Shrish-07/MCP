@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+from utils.strategy_config import DEFAULTS as STRATEGY_DEFAULTS, validate
 
 logger = logging.getLogger("robinhood-agent.utils.config")
 
@@ -125,11 +126,15 @@ def load_config() -> dict:
         logger.error("config_not_a_dict — running on SAFE DEFAULTS (dry-run)")
         user_settings = {}
 
-    settings = _deep_merge(_DEFAULTS, user_settings)
+    settings = _deep_merge(_deep_merge(_DEFAULTS, STRATEGY_DEFAULTS), user_settings)
+    for section in ("execution", "trading", "models", "schedule", "monitor"):
+        if not isinstance(settings.get(section), dict):
+            settings[section] = copy.deepcopy(_DEFAULTS[section])
+            settings["execution"]["dry_run"] = True
 
     # ---- Fail-safe coercions on the critical safety switches ----
     execution = settings["execution"]
-    execution["dry_run"] = _safe_bool(execution.get("dry_run"), default=True)
+    execution["dry_run"] = execution.get("dry_run") is not False
     if str(execution.get("mcp_url", "")).strip() == "":
         execution["mcp_url"] = _DEFAULTS["execution"]["mcp_url"]
     if str(execution.get("tradability_fail_mode", "")).lower() not in ("closed", "open"):
@@ -141,4 +146,11 @@ def load_config() -> dict:
         "FINNHUB_API_KEY": os.getenv("FINNHUB_API_KEY", ""),
         "DRY_RUN": settings["execution"]["dry_run"],
     }
+    settings["configuration_errors"] = validate(settings)
+    if settings["configuration_errors"]:
+        execution["dry_run"] = True
+        settings["env"]["DRY_RUN"] = True
+        logger.error("configuration_invalid errors=%s", settings["configuration_errors"])
+    import hashlib
+    settings["config_revision"] = hashlib.sha256(json.dumps(user_settings,sort_keys=True).encode()).hexdigest()
     return settings

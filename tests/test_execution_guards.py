@@ -218,8 +218,6 @@ async def test_sell_exits_position_with_pnl_dry_run():
     eng, pm = make_engine(FakeClient())
     r = await eng.execute(make_decision("SELL", ticker="OLD", edge=5.0), make_portfolio(), 100.0, dry_run=True)
     assert r.status == "WOULD_EXECUTE"
-    assert pm.get_open_records() == []  # position actually exited
+    assert [r.ticker for r in pm.get_open_records()] == ["OLD"]  # previews cannot close live positions
     perf_path = Path(pm._path).parent / "performance.json"
-    assert perf_path.exists()
-    perf = json.loads(perf_path.read_text())
-    assert round(perf["closed_trades"][-1]["realized_pnl"], 2) == 100.0  # (100-90)*10
+    assert not perf_path.exists()

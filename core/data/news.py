@@ -25,7 +25,7 @@ from pathlib import Path
 import httpx
 
 from models.news import NewsItem
-from utils.rate_limit import RateLimiter
+from utils.rate_limit import finnhub_limiter
 
 _FINNHUB_COMPANY_NEWS = "https://finnhub.io/api/v1/company-news"
 _FINNHUB_GENERAL_NEWS = "https://finnhub.io/api/v1/news"
@@ -60,7 +60,7 @@ class NewsFetcher:
         self._gm_category: str = str(gm.get("category", "general"))
         self._gm_count: int = int(gm.get("count", 8))
         self._max_retries = max_retries
-        self._rate_limiter = RateLimiter(max_calls_per_minute=55)  # under Finnhub's 60/min
+        self._rate_limiter = finnhub_limiter()
 
     # ------------------------------------------------------------------
     # Public API — same signature shape as before  (dict[str, …])

@@ -1,7 +1,6 @@
 """Tests for the central config loader — the fail-safe contract."""
 from __future__ import annotations
 
-import json
 
 from utils.config import _safe_bool, _deep_merge
 

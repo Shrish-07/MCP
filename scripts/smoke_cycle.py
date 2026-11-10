@@ -38,7 +38,6 @@ async def _go() -> int:
     trades = Path("logs/trades.json")
     if trades.exists():
         data = json.loads(trades.read_text(encoding="utf-8"))
-        recent = [t for t in data if t.get("cycle_type", "") in ("OPEN",) or True]
         newest = data[-6:] if len(data) >= 6 else data
         print("SMOKE: last trade log rows:")
         for row in newest:

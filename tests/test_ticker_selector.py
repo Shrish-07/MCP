@@ -1,6 +1,5 @@
 """Unit tests for ticker selector logic."""
 
-import pytest
 from core.weekly.ticker_selector import select_universe, filter_candidates
 
 

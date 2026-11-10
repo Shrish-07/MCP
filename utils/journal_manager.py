@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import List
 
 from models.decisions import JournalEntry
+from utils.persistence import atomic_json
 
 
 class JournalManager:
@@ -61,17 +62,19 @@ class JournalManager:
                 try:
                     existing_raw = path.read_text(encoding="utf-8")
                     existing = json.loads(existing_raw) if existing_raw else []
-                except Exception:
-                    existing = []
+                except (OSError,ValueError) as exc:
+                    self.logger.error("journal_corrupt_preserved ticker=%s error=%s",ticker,exc)
+                    return False
+            if entry.event_id and any(r.get("event_id")==entry.event_id for r in existing):return True
 
             payload = existing + [entry.model_dump(mode="json")]
             # trim to most recent max_entries_per_ticker
             trimmed = payload[-self.max_entries_per_ticker :]
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(trimmed, indent=2), encoding="utf-8")
-            tmp.replace(path)
+            atomic_json(path,trimmed)
+            return True
         except Exception as exc:
             self.logger.warning("journal_write_failed ticker=%s error=%s", ticker, exc)
+            return False
 
     def get_all_tickers(self) -> List[str]:
         """Return list of ticker names present in the journals directory."""

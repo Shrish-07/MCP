@@ -1,0 +1,12 @@
+.git
+.env
+.rh_oauth_cache.json
+venv
+.venv*
+.test-tmp
+.pytest_cache
+__pycache__
+logs
+journals
+data/replays
+*.zip

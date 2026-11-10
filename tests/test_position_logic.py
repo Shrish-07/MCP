@@ -10,7 +10,7 @@ from pathlib import Path
 from core.position.manager import PositionManager
 from models.decisions import DecisionType, ExecutionResult, StructuredEdgeScore, TradeDecision
 from models.market_data import EquityQuote
-from models.portfolio import Portfolio, Position
+from models.portfolio import Portfolio
 
 
 def _pm(config_trading: dict | None = None) -> PositionManager:
@@ -21,8 +21,8 @@ def _pm(config_trading: dict | None = None) -> PositionManager:
 
 def _entry_result(ticker: str, price: float, qty: float) -> tuple[ExecutionResult, TradeDecision]:
     e = StructuredEdgeScore(); e.total = 4.0
-    result = ExecutionResult(ticker=ticker, status="WOULD_EXECUTE", fill_price=price,
-                             quantity=qty, dry_run=True, side="buy")
+    result = ExecutionResult(ticker=ticker, status="FILLED", fill_price=price,
+                             quantity=qty, filled_quantity=qty, dry_run=False, side="buy",order_id=f"fixture-{price}-{qty}")
     decision = TradeDecision(ticker=ticker, decision=DecisionType.BUY, edge=e)
     return result, decision
 
@@ -82,7 +82,7 @@ def test_check_exits_uses_config_and_skips_reconciled_max_hold():
     signals = pm.check_exits(Portfolio(positions=[]), quotes)
     reasons = {s.ticker: s.reason for s in signals}
     # OWNED: +5% < 10% review bar, 40d > 10d hold → MAX_HOLDING_PERIOD fires
-    assert reasons.get("OWNED") == "MAX_HOLDING_PERIOD"
+    assert reasons.get("OWNED") is None  # legacy entry dates are unverified
     # RECON: reconciled → no max-hold advisory
     assert "RECON" not in reasons
 
@@ -97,4 +97,4 @@ def test_review_gain_pct_comes_from_config():
     }]))
     quotes = {"UP": EquityQuote(ticker="UP", price=106.0, bid=106, ask=106, volume=1, prev_close=100)}
     reasons = {s.ticker: s.reason for s in pm.check_exits(Portfolio(positions=[]), quotes)}
-    assert reasons.get("UP") == "PROFIT_REVIEW"  # 6% ≥ 5% config bar (was hard 15%)
+    assert reasons.get("UP") is None  # profit alone is not an exit signal

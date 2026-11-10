@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 
 from robinhood_mcp.robinhood_client import RobinhoodMCPClient
-from models.market_data import EquityQuote, OHLCVBar
+from models.market_data import OHLCVBar
 from models.portfolio import Portfolio
 
 
@@ -18,15 +18,17 @@ class DataIngestLayer:
 
     async def ingest(self, tickers: list[str], existing_tickers: list[str]) -> dict:
         """Fetch portfolio, quotes, and historical bars for the union of watchlist and open positions."""
-        deduped = list(dict.fromkeys([*tickers, *existing_tickers]))[:20]
+        deduped = list(dict.fromkeys([*existing_tickers, *tickers]))
         try:
             portfolio = await self.client.get_portfolio()
         except Exception as exc:
             self.logger.warning("portfolio_fetch_failed: %s", exc)
-            portfolio = Portfolio()
+            portfolio = Portfolio(reconciliation_status="FAILED", errors=[str(exc)])
 
         try:
-            quotes = await self.client.get_equity_quotes(deduped)
+            quotes = []
+            for start in range(0, len(deduped), 20):
+                quotes.extend(await self.client.get_equity_quotes(deduped[start:start+20]))
             quote_map = {item.ticker: item for item in quotes}
         except Exception as exc:
             self.logger.warning("quote_fetch_failed: %s", exc)
@@ -56,12 +58,12 @@ class DataIngestLayer:
         This intentionally skips fetching historical bars to save API/time.
         """
         existing_tickers = existing_tickers or []
-        deduped = list(dict.fromkeys([*tickers, *existing_tickers]))[:20]
+        deduped = list(dict.fromkeys([*existing_tickers, *tickers]))
         try:
             portfolio = await self.client.get_portfolio()
         except Exception as exc:
             self.logger.warning("portfolio_fetch_failed: %s", exc)
-            portfolio = Portfolio()
+            portfolio = Portfolio(reconciliation_status="FAILED", errors=[str(exc)])
 
         try:
             quotes = await self.client.get_equity_quotes(deduped)

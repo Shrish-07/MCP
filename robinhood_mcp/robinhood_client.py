@@ -81,6 +81,10 @@ from models.market_data import EquityQuote, OHLCVBar
 from models.portfolio import Portfolio, Position
 
 
+class AccountResolutionError(RuntimeError):
+    """Account-dependent operations cannot proceed."""
+
+
 class MCPError(RuntimeError):
     """Raised when a Robinhood MCP request fails."""
 
@@ -97,7 +101,9 @@ REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}/callback"
 
 # Project-root-relative cache path (mcp/ -> project root -> cache file)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-TOKEN_CACHE_PATH = _PROJECT_ROOT / ".rh_oauth_cache.json"
+import os
+
+TOKEN_CACHE_PATH = Path(os.getenv("ROBINHOOD_TOKEN_CACHE", str(_PROJECT_ROOT / ".rh_oauth_cache.json")))
 
 # Refresh proactively when less than this many seconds remain on the
 # access token, rather than waiting for a live 401 mid-cycle.
@@ -192,20 +198,25 @@ class RobinhoodMCPClient:
 
     def _save_token_cache(self, token_data: dict[str, Any]) -> None:
         try:
-            TOKEN_CACHE_PATH.write_text(json.dumps(token_data, indent=2), encoding="utf-8")
+            from utils.persistence import atomic_json
+            atomic_json(TOKEN_CACHE_PATH, token_data, backup=False, private=True)
         except Exception as exc:
             self.logger.warning("token_cache_write_failed: %s", exc)
 
     def _token_is_fresh(self, token_data: dict[str, Any]) -> bool:
         """Return True if the cached access token still has enough life left."""
-        if not token_data.get("access_token"):
+        if not isinstance(token_data, dict) or not isinstance(token_data.get("access_token"), str) or not token_data["access_token"]:
             return False
         issued_at = token_data.get("_issued_at", 0)
         expires_in = token_data.get("expires_in", 0)
         if not expires_in:
             return False
-        expiry = issued_at + expires_in
-        return (expiry - time.time()) > TOKEN_REFRESH_MARGIN_SECONDS
+        from math import isfinite
+        try:
+            expiry = float(issued_at) + float(expires_in)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return isfinite(expiry) and (expiry - time.time()) > TOKEN_REFRESH_MARGIN_SECONDS
 
     async def _register_client(self) -> dict[str, Any] | None:
         """Dynamic client registration (RFC 7591). Only needed once; the
@@ -223,12 +234,11 @@ class RobinhoodMCPClient:
                 if resp.status_code in (200, 201):
                     return resp.json()
                 self.logger.error(
-                    "oauth_registration_failed status=%d body=%s",
-                    resp.status_code, resp.text[:500],
+                    "oauth_registration_failed status=%d", resp.status_code,
                 )
                 return None
         except Exception as exc:
-            self.logger.error("oauth_registration_error: %s", exc)
+            self.logger.error("oauth_registration_error: %s", type(exc).__name__)
             return None
 
     async def _run_browser_auth_flow(self, client_id: str) -> dict[str, Any] | None:
@@ -285,7 +295,7 @@ class RobinhoodMCPClient:
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             if resp.status_code != 200:
-                raise MCPError(f"OAuth token exchange failed: HTTP {resp.status_code}: {resp.text[:300]}")
+                raise MCPError(f"OAuth token exchange failed: HTTP {resp.status_code}")
             token_data = resp.json()
             token_data["_client_id"] = client_id
             token_data["_issued_at"] = time.time()
@@ -318,7 +328,7 @@ class RobinhoodMCPClient:
                     token_data["refresh_token"] = refresh_token
                 return token_data
         except Exception as exc:
-            self.logger.warning("oauth_refresh_error: %s", exc)
+            self.logger.warning("oauth_refresh_error: %s", type(exc).__name__)
             return None
 
     async def _ensure_valid_token(self) -> str:
@@ -378,8 +388,8 @@ class RobinhoodMCPClient:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
 
-        last_error: Exception | None = None
-        for attempt in range(1, self.max_retries + 1):
+        attempts = 1 if tool_name.startswith(("place_", "cancel_")) else self.max_retries
+        for attempt in range(1, attempts + 1):
             attempt_start = time.perf_counter()
             try:
                 access_token = await self._ensure_valid_token()
@@ -389,6 +399,8 @@ class RobinhoodMCPClient:
                     async with ClientSession(read, write) as session:
                         await session.initialize()
                         result = await session.call_tool(tool_name, arguments)
+                        if getattr(result, "isError", False):
+                            raise MCPError(f"MCP tool {tool_name} returned an error")
 
                 content = [
                     c.model_dump() if hasattr(c, "model_dump") else str(c)
@@ -411,17 +423,16 @@ class RobinhoodMCPClient:
                 return content
 
             except Exception as exc:
-                last_error = exc
                 duration_ms = (time.perf_counter() - attempt_start) * 1000
                 self.logger.warning(
                     "mcp_tool_call_attempt_%d_failed tool=%s error=%s",
-                    attempt, tool_name, exc,
+                    attempt, tool_name, type(exc).__name__,
                 )
 
                 exc_info = {
                     "exception_class": type(exc).__name__,
-                    "exception_message": str(exc),
-                    "exception_traceback": traceback.format_exc(),
+                    "exception_message": "Broker transport failure",
+                    "exception_traceback": "".join(traceback.format_list(traceback.extract_tb(exc.__traceback__))),
                 }
                 asyncio.ensure_future(
                     capture_direct_mcp_call(
@@ -441,13 +452,13 @@ class RobinhoodMCPClient:
                 exc_str = str(exc).lower()
                 if "invalid params" in exc_str or "missing properties" in exc_str:
                     raise MCPError(
-                        f"Tool '{tool_name}' rejected arguments {arguments}: {exc}"
-                    ) from exc
+                        f"Tool '{tool_name}' rejected its parameters"
+                    ) from None
 
-                if attempt < self.max_retries:
+                if attempt < attempts:
                     await asyncio.sleep(2 ** (attempt - 1))
 
-        raise MCPError(f"Tool '{tool_name}' failed after {self.max_retries} attempts") from last_error
+        raise MCPError(f"Tool '{tool_name}' failed after {attempts} attempts") from None
 
     @staticmethod
     def _extract_json_payload(content: list[dict[str, Any]]) -> Any:
@@ -469,49 +480,23 @@ class RobinhoodMCPClient:
     # ------------------------------------------------------------------ #
 
     async def _get_account_number(self) -> str:
-        """Fetch and cache the Robinhood Agentic account number.
-
-        CRITICAL: Robinhood accounts can have MULTIPLE accounts under one
-        login (e.g. a primary individual margin account AND a separate
-        Agentic cash account). This was validated live — using the wrong
-        one (e.g. is_default=true) would return the wrong account's data
-        entirely. The correct selection is explicitly agentic_allowed=true,
-        never is_default or "first in list".
-        """
-        if self._cached_account_number:
-            return self._cached_account_number
-
+        """Resolve one explicitly authorized Agentic account."""
         try:
-            content = await self._call_tool_with_retry("get_accounts", {})
-            parsed = self._extract_json_payload(content)
-            accounts = []
-            if isinstance(parsed, dict):
-                accounts = parsed.get("data", {}).get("accounts", [])
-
-            agentic_account = next(
-                (a for a in accounts if a.get("agentic_allowed") is True), None
-            )
-            if agentic_account:
-                account_number = agentic_account.get("account_number", "")
-                self.logger.info(
-                    "agentic_account_selected nickname=%s type=%s",
-                    agentic_account.get("nickname", "(none)"),
-                    agentic_account.get("type", "(unknown)"),
-                )
-            else:
-                account_number = ""
-                self.logger.error(
-                    "no_agentic_account_found — refusing to guess which account "
-                    "to use. Check that your Robinhood Agentic account is "
-                    "properly set up. Raw accounts seen: %s", accounts,
-                )
-
-            self._cached_account_number = account_number
-            return account_number
-
-        except Exception as exc:
-            self.logger.warning("account_number_fetch_failed: %s", exc)
-            return ""
+            parsed = self._extract_json_payload(await self._call_tool_with_retry("get_accounts", {}))
+            accounts = parsed["data"]["accounts"]
+            if not isinstance(accounts, list) or any(not isinstance(row, dict) for row in accounts):
+                raise ValueError("invalid account list")
+            matches = [row.get("account_number") for row in accounts if row.get("agentic_allowed") is True]
+            if len(matches) != 1 or not isinstance(matches[0], str) or not matches[0].strip():
+                raise ValueError("ambiguous or missing Agentic account")
+            account = matches[0].strip()
+            pinned = getattr(self, "_cached_account_number", "")
+            if pinned and pinned != account:
+                raise ValueError("Agentic account changed during the session")
+            self._cached_account_number = account
+            return account
+        except Exception:
+            raise AccountResolutionError("A unique verified Agentic account is required") from None
 
     # ------------------------------------------------------------------ #
     #  Response cleanup helpers (identical business logic to previous
@@ -572,7 +557,7 @@ class RobinhoodMCPClient:
         empty positions list) keep working.
         """
         account_number = await self._get_account_number()
-        args = {"account_number": account_number} if account_number else {}
+        args = {"account_number": account_number}
         content = await self._call_tool_with_retry("get_portfolio", args)
         parsed = self._extract_json_payload(content)
 
@@ -581,13 +566,23 @@ class RobinhoodMCPClient:
         else:
             portfolio_data = parsed if isinstance(parsed, dict) else {}
 
+        if not isinstance(portfolio_data, dict) or not portfolio_data:
+            raise MCPError("Malformed portfolio aggregate response")
         portfolio_data = self._coerce_portfolio_fields(portfolio_data)
         portfolio = Portfolio.model_validate(portfolio_data)
+        from hashlib import sha256
+        portfolio.account_id = sha256(account_number.encode("utf-8")).hexdigest()
 
         try:
             portfolio.positions = await self.get_equity_positions()
+            portfolio.positions_complete = True
+            portfolio.reconciliation_status = "SUCCESS"
+            portfolio.timestamp = datetime.now(timezone.utc).isoformat()
         except Exception as exc:
-            self.logger.warning("get_portfolio_positions_merge_failed: %s", exc)
+            self.logger.warning("get_portfolio_positions_merge_failed: %s", type(exc).__name__)
+            portfolio.positions = list(getattr(self, "_last_valid_position_rows", []))
+            portfolio.reconciliation_status = "FAILED"
+            portfolio.errors.append(type(exc).__name__)
 
         return portfolio
 
@@ -622,6 +617,8 @@ class RobinhoodMCPClient:
                     or 0
                 ),
                 "change_pct": 0.0,
+                "timestamp": q.get("updated_at") or q.get("timestamp") or q.get("last_trade_time") or "",
+                "received_at": datetime.now(timezone.utc).isoformat(),
             })
         return [EquityQuote.model_validate(m) for m in mapped]
 
@@ -725,8 +722,7 @@ class RobinhoodMCPClient:
         """
         account_number = await self._get_account_number()
         args = {"symbols": [ticker]}
-        if account_number:
-            args["account_number"] = account_number
+        args["account_number"] = account_number
         content = await self._call_tool_with_retry("get_equity_tradability", args)
         parsed = self._extract_json_payload(content)
 
@@ -741,7 +737,7 @@ class RobinhoodMCPClient:
 
     async def _resolve_watchlist_id(self, watchlist_name: str) -> str:
         """Resolve a watchlist's display name to its list_id UUID."""
-        cache_attr = f"_watchlist_id_cache"
+        cache_attr = "_watchlist_id_cache"
         if not hasattr(self, cache_attr):
             setattr(self, cache_attr, {})
         cache = getattr(self, cache_attr)
@@ -828,16 +824,21 @@ class RobinhoodMCPClient:
         real position from the caller.
         """
         account_number = await self._get_account_number()
-        args = {"account_number": account_number} if account_number else {}
+        args = {"account_number": account_number}
         content = await self._call_tool_with_retry("get_equity_positions", args)
         parsed = self._extract_json_payload(content)
 
         if isinstance(parsed, dict) and "data" in parsed:
-            items = parsed["data"].get("results", parsed["data"].get("positions", []))
+            data = parsed["data"]
+            if not isinstance(data, dict) or not any(k in data for k in ("results", "positions")) or data.get("next") or data.get("next_cursor"):
+                raise MCPError("Incomplete/unknown positions envelope")
+            items = data.get("results", data.get("positions"))
         elif isinstance(parsed, list):
             items = parsed
         else:
-            items = []
+            raise MCPError("Unknown equity positions response; not an empty portfolio")
+        if not isinstance(items, list):
+            raise MCPError("Malformed equity positions list")
 
         def _first(d: dict[str, Any], *keys: str, default: Any = 0) -> Any:
             for k in keys:
@@ -852,16 +853,23 @@ class RobinhoodMCPClient:
                 return 0.0
 
         positions: list[Position] = []
+        errors = []
         for item in items:
             if not isinstance(item, dict):
+                errors.append("non-object position row")
                 continue
             try:
                 ticker = str(_first(item, "symbol", "ticker", "instrument_symbol", default="")).upper().strip()
                 if not ticker:
                     self.logger.warning("get_equity_positions_skip_no_ticker item_keys=%s", list(item.keys()))
-                    continue
-                quantity = _f(_first(item, "quantity", "shares", "quantity_available"))
-                avg_cost = _f(_first(item, "average_buy_price", "avg_cost", "average_cost", "cost_basis_per_share"))
+                    raise ValueError("missing position symbol")
+                from models.portfolio import PositionRecord
+                ticker = PositionRecord.valid_ticker(ticker)
+                quantity = float(_first(item, "quantity", "shares", "quantity_available", default=None))
+                avg_cost = float(_first(item, "average_buy_price", "avg_cost", "average_cost", "cost_basis_per_share", default=None))
+                import math
+                if not math.isfinite(quantity) or quantity < 0 or (quantity > 0 and (not math.isfinite(avg_cost) or avg_cost <= 0)):
+                    raise ValueError("invalid quantity or cost basis")
                 current_price = _f(_first(item, "current_price", "last_trade_price", "price", "mark_price"))
                 market_value = _f(_first(item, "market_value", "equity", "current_value"))
                 if market_value == 0.0 and current_price > 0 and quantity > 0:
@@ -885,10 +893,14 @@ class RobinhoodMCPClient:
                     "sector": sector,
                 }))
             except Exception as exc:
-                self.logger.warning("get_equity_positions_row_skipped item_keys=%s error=%s", list(item.keys()), exc)
+                self.logger.warning("get_equity_positions_row_skipped item_keys=%s error=%s", list(item.keys()), type(exc).__name__)
+                errors.append(str(exc))
                 continue
 
         self.logger.info("get_equity_positions_parsed count=%d", len(positions))
+        self._last_valid_position_rows = positions
+        if errors:
+            raise MCPError(f"Incomplete positions response: {len(errors)} malformed rows")
         return positions
 
     async def get_earnings_calendar(self) -> dict[str, Any]:
@@ -1007,8 +1019,7 @@ class RobinhoodMCPClient:
             "type": order_type,
             "quantity": f"{quantity:.6f}".rstrip("0").rstrip(".") or "0",
         }
-        if account_number:
-            args["account_number"] = account_number
+        args["account_number"] = account_number
         content = await self._call_tool_with_retry("review_equity_order", args)
         parsed = self._extract_json_payload(content)
         return parsed.get("data", {}) if isinstance(parsed, dict) else {}
@@ -1029,7 +1040,7 @@ class RobinhoodMCPClient:
         """
         if dry_run:
             preview = await self.review_equity_order(ticker, side, quantity, order_type)
-            self.logger.info("dry_run_preview ticker=%s preview=%s", ticker, preview)
+            self.logger.info("dry_run_preview ticker=%s", ticker)
             return ExecutionResult(
                 ticker=ticker,
                 status="SIMULATED",
@@ -1046,8 +1057,7 @@ class RobinhoodMCPClient:
             "type": order_type,
             "quantity": f"{quantity:.6f}".rstrip("0").rstrip(".") or "0",
         }
-        if account_number:
-            args["account_number"] = account_number
+        args["account_number"] = account_number
 
         content = await self._call_tool_with_retry("place_equity_order", args)
         parsed = self._extract_json_payload(content)
@@ -1057,6 +1067,8 @@ class RobinhoodMCPClient:
         data = parsed.get("data", parsed) if isinstance(parsed, dict) else {}
         order = data.get("order", data) if isinstance(data, dict) else {}
 
+        if not isinstance(order, dict) or not isinstance(data, dict):
+            order, data = {}, {}
         order_id = (
             order.get("id")
             or order.get("order_id")
@@ -1066,10 +1078,8 @@ class RobinhoodMCPClient:
         )
         fill_price = float(
             order.get("average_price")
-            or order.get("price")
             or order.get("filled_price")
             or data.get("average_price")
-            or data.get("price")
             or 0.0
         )
         status_raw = str(
@@ -1081,19 +1091,110 @@ class RobinhoodMCPClient:
         ).upper()
 
         if status_raw in ("FILLED", "COMPLETED", "EXECUTED"):
-            status = "EXECUTED"
+            status = "FILLED"
         elif status_raw in ("QUEUED", "CONFIRMED", "UNCONFIRMED", "SUBMITTED", ""):
             status = "SUBMITTED"
         else:
             status = status_raw or "SUBMITTED"
 
+        if not isinstance(order_id, str) or not order_id.strip():
+            return ExecutionResult(ticker=ticker, side=side, quantity=quantity,
+                status="UNKNOWN_REQUIRES_RECONCILIATION", dry_run=False)
         return ExecutionResult(
             ticker=ticker,                    # always inject — never trust the payload
             order_id=str(order_id),
             status=status,
             fill_price=fill_price,
             quantity=quantity,
+            filled_quantity=float(order["cumulative_quantity"]) if order.get("cumulative_quantity") is not None else None,
+            fills=self._parse_executions(order),
+            raw_order=order,
             timestamp=datetime.now(timezone.utc).isoformat(),
             dry_run=False,
             side=side,
         )
+
+    @staticmethod
+    def _parse_executions(order):
+        fills = []
+        for row in order.get("executions", []):
+            if not isinstance(row, dict) or not row.get("id"):
+                raise MCPError("Execution missing stable ID")
+            fills.append({"id": str(row["id"]), "quantity": float(row["quantity"]),
+                "price": float(row["price"]), "timestamp": row.get("timestamp"), "fees": row.get("fees")})
+        return fills
+
+    async def _verify_order_cursor_contract(self):
+        """Confirm that the connected server advertises the cursor parameter."""
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
+
+        try:
+            token = await self._ensure_valid_token()
+            async with streamablehttp_client(self.url, headers={"Authorization": f"Bearer {token}"}, timeout=30) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    catalog = await session.list_tools()
+            tool = next((item for item in catalog.tools if item.name == "get_equity_orders"), None)
+            if tool is None or tool.inputSchema.get("properties", {}).get("cursor", {}).get("type") != "string":
+                raise ValueError("no declared cursor")
+        except Exception:
+            raise MCPError("Order pagination contract unavailable") from None
+
+    async def get_equity_orders(self):
+        """Fetch complete history using only a server-advertised cursor."""
+        from urllib.parse import parse_qs, urlsplit
+
+        account = await self._get_account_number()
+        args = {"account_number": account}
+        cursors = set()
+        rows = []
+        for _ in range(100):
+            content = await self._call_tool_with_retry("get_equity_orders", args)
+            parsed = self._extract_json_payload(content)
+            data = parsed.get("data", parsed) if isinstance(parsed, dict) else parsed
+            page = data.get("results", data.get("orders")) if isinstance(data, dict) else data
+            if not isinstance(page, list):
+                raise MCPError("Unknown order-history response")
+            rows.extend(page)
+            if not isinstance(data, dict):
+                break
+            cursor = data.get("next_cursor")
+            link = data.get("next")
+            if link:
+                if not isinstance(link, str):
+                    raise MCPError("Invalid order continuation")
+                tokens = parse_qs(urlsplit(link).query).get("cursor", [])
+                if len(tokens) != 1 or cursor and tokens[0] != cursor:
+                    raise MCPError("Ambiguous order continuation")
+                cursor = tokens[0]
+            if not cursor:
+                if data.get("has_more") or data.get("partial") or data.get("complete") is False:
+                    raise MCPError("Incomplete order history")
+                break
+            if not isinstance(cursor, str) or cursor in cursors:
+                raise MCPError("Invalid or repeated order cursor")
+            if not cursors:
+                await self._verify_order_cursor_contract()
+            cursors.add(cursor)
+            args = {"account_number": account, "cursor": cursor}
+        else:
+            raise MCPError("Order history exceeded page safety limit")
+        order_ids = [row.get("id") for row in rows if isinstance(row, dict)]
+        if any(not isinstance(order_id, str) or not order_id.strip() for order_id in order_ids):
+            raise MCPError("Order history contains an invalid order identifier")
+        if len(set(order_ids)) != len(order_ids):
+            raise MCPError("Order history changed or repeated rows during retrieval")
+        results = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("id") or not row.get("symbol") or row.get("side") not in ("buy", "sell"):
+                raise MCPError("Malformed broker order")
+            status = str(row.get("state", "UNKNOWN_REQUIRES_RECONCILIATION")).upper()
+            status = {"QUEUED": "SUBMITTED", "CONFIRMED": "SUBMITTED", "UNCONFIRMED": "SUBMITTED", "CANCELED": "CANCELLED"}.get(status, status)
+            if status not in {"CREATED","SUBMITTED","PARTIALLY_FILLED","FILLED","CANCEL_REQUESTED","CANCELLED","REJECTED","EXPIRED"}:
+                status="UNKNOWN_REQUIRES_RECONCILIATION"
+            results.append(ExecutionResult(ticker=row["symbol"], order_id=str(row["id"]), side=row["side"],
+                status=status, quantity=float(row["quantity"]), filled_quantity=float(row["cumulative_quantity"]) if row.get("cumulative_quantity") is not None else None,
+                fill_price=float(row.get("average_price") or 0), fills=self._parse_executions(row),
+                dry_run=False, raw_order=row, timestamp=row.get("updated_at", "")))
+        return results

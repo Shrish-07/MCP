@@ -39,7 +39,9 @@ class AnthropicClient:
         self.temperature = temperature
         self.logger = logging.getLogger("robinhood-agent.anthropic")
         self.cost_tracker = CostTracker()
-        self.client = anthropic.AsyncAnthropic()
+        # Strategic model availability must not prevent the safety backend
+        # from starting. Missing credentials fail only the advisory call.
+        self.client = None
 
     async def complete(self, system: str | list[dict], user: str) -> str:
         """Complete a prompt and return the clean response text.
@@ -50,6 +52,8 @@ class AnthropicClient:
         last_error: Exception | None = None
         for attempt in range(1, 4):
             try:
+                if self.client is None:
+                    self.client = anthropic.AsyncAnthropic(max_retries=0)
                 request_kwargs = {
                     "model": self.model,
                     "max_tokens": self.max_tokens,
@@ -67,16 +71,21 @@ class AnthropicClient:
                 if usage is not None:
                     cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
                     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
-                    self.cost_tracker.record(
-                        self.model,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        cache_creation_tokens=cache_create,
-                        cache_read_tokens=cache_read,
-                    )
+                    try:
+                        self.cost_tracker.record(
+                            getattr(response, "model", self.model), usage.input_tokens, usage.output_tokens,
+                            cache_creation_tokens=cache_create, cache_read_tokens=cache_read,
+                            raw_usage=usage.model_dump(mode="json"), request_id=getattr(response, "id", None))
+                    except Exception as exc:
+                        # A ledger failure must not retry an already billed API request.
+                        self.logger.error("cost_observability_failed error=%s", exc)
+                else:
+                    self._record_unpriced("usage unavailable", getattr(response, "id", None))
                 return strip_fences(text)
             except Exception as exc:
                 last_error = exc
+                if self.client is not None:
+                    self._record_unpriced(type(exc).__name__, getattr(exc, "request_id", None))
                 if self._is_retryable(exc) and attempt < 3:
                     self.logger.warning("anthropic_retry attempt=%d error=%s", attempt, exc)
                     await asyncio.sleep(5)
@@ -84,6 +93,12 @@ class AnthropicClient:
                 self.logger.exception("anthropic_completion_failed model=%s: %s", self.model, exc)
                 raise RuntimeError("Anthropic API request failed") from exc
         raise RuntimeError("Anthropic API request failed") from last_error
+
+    def _record_unpriced(self, reason, request_id):
+        try:
+            self.cost_tracker.record_unpriced(self.model, reason, request_id)
+        except (OSError, ValueError):
+            self.logger.error("Unable to record unpriced Anthropic attempt")
 
     @staticmethod
     def _is_retryable(exc: Exception) -> bool:

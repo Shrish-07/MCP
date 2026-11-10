@@ -1,0 +1,23 @@
+services:
+  agent:
+    build:
+      context: .
+      args:
+        INSTALL_SENTIMENT: ${INSTALL_SENTIMENT:-false}
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./journals:/app/journals
+      - oauth-cache:/app/oauth
+      - sentiment-cache:/home/agent/.cache/huggingface
+    environment:
+      ROBINHOOD_TOKEN_CACHE: /app/oauth/token.json
+    stop_grace_period: 45s
+    # Exactly one replica. Plain JSON requires an OS lock and durable volumes.
+volumes:
+  oauth-cache:
+  sentiment-cache:

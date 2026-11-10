@@ -11,6 +11,13 @@ import logging
 from datetime import datetime
 
 logger = logging.getLogger("robinhood-agent.utils.rate_limit")
+_shared = None
+
+
+def finnhub_limiter():
+    global _shared
+    if _shared is None:_shared=RateLimiter(max_calls_per_minute=55)
+    return _shared
 
 
 class RateLimiter:

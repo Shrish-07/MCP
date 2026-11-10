@@ -8,7 +8,12 @@
     "dry_run": true,
     "mcp_url": "https://agent.robinhood.com/mcp/trading",
     "tradability_fail_mode": "closed",
-    "min_dollar_volume": 75000000
+    "min_dollar_volume": 75000000,
+    "live_release_approved": false,
+    "quote_max_age_seconds": 60,
+    "reconciliation_max_age_seconds": 120,
+    "manual_stop_file": "data/STOP_TRADING",
+    "extended_hours_enabled": false
   },
   "logging": {
     "level": "INFO"
@@ -79,6 +84,17 @@
     "market_hours": {
       "calendar": "NYSE",
       "stale_data_guard": true
+    },
+    "max_new_entries_per_day": 2,
+    "sector_cap_pct": 0.3,
+    "earnings_window_discount_notches": 1,
+    "add_to_position": {
+      "enabled": true,
+      "max_adds_per_position": 1,
+      "max_increment_pct_of_position_value": 0.25,
+      "max_incremental_risk_fraction_of_equity": 0.0025,
+      "cooldown_hours": 24,
+      "require_valid_existing_stop": true
     }
   },
   "schedule": {
@@ -128,10 +144,11 @@
     "enabled": true,
     "pricing": {
       "claude-sonnet-5-5": {
-        "input": 3.0,
-        "cache_write": 3.75,
-        "cache_read": 0.3,
-        "output": 15.0
+        "input": 2.0,
+        "cache_write": 2.5,
+        "cache_read": 0.1,
+        "output": 10.0,
+        "cache_write_1h": 4.0
       },
       "*": {
         "input": 3.0,
@@ -139,7 +156,8 @@
         "cache_read": 0.3,
         "output": 15.0
       }
-    }
+    },
+    "pricing_version": "anthropic-2026-11-07"
   },
   "sentiment_selection": {
     "enabled": true,
@@ -159,5 +177,109 @@
     "attribution_enabled": true,
     "attribution_hour": 16,
     "attribution_minute": 5
+  },
+  "discovery": {
+    "enabled": false,
+    "universe_file": "data/sp500_universe.json",
+    "shortlist_file": "data/discovery_shortlist.json",
+    "features_dir": "data",
+    "universe_max_age_days": 14,
+    "shortlist_max_age_days": 8,
+    "min_cohort": 20,
+    "gates": {
+      "min_dollar_volume": 75000000,
+      "min_price": 5.0,
+      "max_vol_30d_pct_annualized": 120.0,
+      "min_bars": 250
+    },
+    "shortlist": {
+      "new_candidate_count": 10,
+      "divergence_pool_cap": 15,
+      "drift_pool_cap": 5,
+      "candidate_memory_runs": 2
+    },
+    "gap_weights": {
+      "sentiment_mean": 1.0,
+      "velocity": 0.5,
+      "delta": 0.5,
+      "momentum_blend": [
+        0.6,
+        0.4
+      ],
+      "recent_move": 0.3
+    },
+    "archetypes": {
+      "lagged_gap_z": 1.0,
+      "inflection_delta": 0.3,
+      "avoid_gap_z": -1.0
+    },
+    "fingerprints": {
+      "pullback_min": 0.02,
+      "pullback_max": 0.1,
+      "uptrend_slope_min": 0.01,
+      "base_range_ratio_max": 0.8,
+      "base_vol_ratio_max": 0.8,
+      "down_volume_ratio_max": 0.8,
+      "exhaustion_min": 0.05,
+      "exhaustion_max": 0.15
+    },
+    "schedule": {
+      "feature_hour_et": 20,
+      "rank_day": "sun",
+      "rank_hour_et": 20
+    }
+  },
+  "exits": {
+    "enabled": true,
+    "breakeven_ratchet_pct": 0.05,
+    "breakeven_lock_gain_pct": 0.005,
+    "chandelier": {
+      "activate_at_pct": 0.1,
+      "atr_multiple": 3.0,
+      "atr_period": 14
+    },
+    "take_profit_mode": "graduate",
+    "take_profit_pct": 0.2,
+    "climax": {
+      "rsi_min": 80,
+      "sigma_above_20dma": 3.0,
+      "tighten_atr_multiple": 2.0
+    },
+    "trend_break": {
+      "ma_days": 20,
+      "consecutive_closes": 2,
+      "only_if_was_profitable": true
+    },
+    "sentiment_reversal": {
+      "delta_z": -1.0,
+      "news_velocity_multiple": 2.0
+    },
+    "gap_closure_z": 0.3,
+    "dead_money": {
+      "trading_days": 10,
+      "unrealized_band_pct": 0.02,
+      "gap_progress_min": 0.25
+    },
+    "rotation_margin_z": 0.8,
+    "partial_take": {
+      "enabled": false,
+      "at_pct": 0.15,
+      "fraction": 0.5
+    },
+    "specialized_review": {
+      "drop_pct_threshold": 0.05,
+      "vol_aware": true,
+      "drop_atr_multiple": 1.5,
+      "fifty_two_week_high_review": true,
+      "review_cooldown_hours": 24,
+      "new_high_rearm_atr_multiple": 1.0
+    },
+    "pead": {
+      "enabled": true,
+      "min_sessions_after_earnings": 5,
+      "capture_fraction_threshold": 0.8,
+      "max_drift_sessions": 15,
+      "min_comparable_events": 30
+    }
   }
 }

@@ -1,0 +1,175 @@
+{
+  "commit": "9743074f0927c0689b98db91291d3cc2366e5df6",
+  "python": "3.13.6",
+  "os": "Windows-11-10.0.26300-SP0",
+  "environment_variable_names": [
+    "ANTHROPIC_API_KEY",
+    "FINNHUB_API_KEY"
+  ],
+  "test_command": "python -m pytest -q",
+  "baseline_passed": 55,
+  "external_model_tests_deselected": 2,
+  "configuration": {
+    "models": {
+      "decision": "claude-sonnet-5-5",
+      "max_tokens": 4096,
+      "send_temperature": false
+    },
+    "execution": {
+      "dry_run": true,
+      "mcp_url": "https://agent.robinhood.com/mcp/trading",
+      "tradability_fail_mode": "closed",
+      "min_dollar_volume": 75000000
+    },
+    "logging": {
+      "level": "INFO"
+    },
+    "trading": {
+      "max_positions": 12,
+      "max_position_pct": 0.08,
+      "edge_score_threshold": 3.0,
+      "take_profit_pct": 0.2,
+      "profit_review_pct": 0.15,
+      "max_holding_days": 15,
+      "cycle_edge_bonus": {
+        "OPEN": 0.0,
+        "MID": 0.25,
+        "CLOSE": 0.5
+      },
+      "stop_loss_bands": [
+        [
+          0,
+          -0.07
+        ],
+        [
+          30,
+          -0.1
+        ],
+        [
+          60,
+          -0.13
+        ],
+        [
+          90,
+          -0.16
+        ]
+      ],
+      "size_ladder": [
+        [
+          3.0,
+          0.03
+        ],
+        [
+          3.5,
+          0.04
+        ],
+        [
+          4.0,
+          0.06
+        ],
+        [
+          4.5,
+          0.08
+        ]
+      ],
+      "vol_sizing": [
+        [
+          30,
+          0.8
+        ],
+        [
+          60,
+          0.6
+        ],
+        [
+          90,
+          0.45
+        ]
+      ],
+      "extreme_vol_reject_30d": 120.0,
+      "market_hours": {
+        "calendar": "NYSE",
+        "stale_data_guard": true
+      }
+    },
+    "schedule": {
+      "open_hour": 9,
+      "open_minute": 35,
+      "mid_hour": 12,
+      "mid_minute": 30,
+      "close_hour": 15,
+      "close_minute": 30,
+      "timezone": "America/New_York"
+    },
+    "monitor": {
+      "enabled": true,
+      "historicals_span": "3month",
+      "interval_seconds": 15,
+      "profit_review_cooldown_min": 15,
+      "profit_target_cooldown_min": 5,
+      "check_max_holding": true
+    },
+    "watchlist": {
+      "default_tickers": [
+        "JPM",
+        "NVDA",
+        "AVGO",
+        "CAT",
+        "MU",
+        "TSM",
+        "UNH",
+        "XOM",
+        "AMD",
+        "COST"
+      ],
+      "robinhood_watchlist_name": "Default"
+    },
+    "news": {
+      "provider": "finnhub",
+      "lookback_days": 3,
+      "max_per_ticker": 5,
+      "fresh_window_hours": 24,
+      "general_market": {
+        "enabled": true,
+        "category": "general",
+        "count": 8
+      }
+    },
+    "cost_tracking": {
+      "enabled": true,
+      "pricing": {
+        "claude-sonnet-5-5": {
+          "input": 3.0,
+          "cache_write": 3.75,
+          "cache_read": 0.3,
+          "output": 15.0
+        },
+        "*": {
+          "input": 3.0,
+          "cache_write": 3.75,
+          "cache_read": 0.3,
+          "output": 15.0
+        }
+      }
+    },
+    "sentiment_selection": {
+      "enabled": true,
+      "universe_size": 10,
+      "lookback_days": 7,
+      "min_sentiment_score": -1.0,
+      "schedule_day": "sun",
+      "schedule_hour": 20,
+      "schedule_minute": 0,
+      "schedule_timezone": "America/New_York",
+      "model_name": "AnkitAI/FinSense-ModernBERT-Financial-News-Sentiment-Analysis",
+      "fallback_model": "AnkitAI/distilbert-base-uncased-financial-news-sentiment-analysis",
+      "batch_size": 16,
+      "cache_max_age_hours": 24
+    },
+    "reporting": {
+      "attribution_enabled": true,
+      "attribution_hour": 16,
+      "attribution_minute": 5
+    }
+  }
+}

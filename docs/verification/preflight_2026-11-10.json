@@ -1,0 +1,18 @@
+{
+  "python": "3.13.6",
+  "dry_run": true,
+  "discovery_enabled": false,
+  "live_release_approved": false,
+  "configuration_errors": [],
+  "state_load_error": null,
+  "archived_positions_count_not_current_account": 4,
+  "sentiment_dependencies_installed": true,
+  "live_ready": false,
+  "requires_runtime_evidence": [
+    "fresh actual broker holdings/open orders and source quote timestamps",
+    "exact-scope Anthropic dashboard reconciliation",
+    "operator review of release checklist and deployment restart/outage evidence",
+    "explicit owner-controlled live activation"
+  ],
+  "no_waiting_period": "No fixed calendar trial, minimum trade count, or automatic exposure ramp."
+}

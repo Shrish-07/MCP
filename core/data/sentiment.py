@@ -13,15 +13,9 @@ import threading
 from functools import lru_cache
 from typing import List, Optional
 
-try:
-    import torch
-    from transformers import AutoModelForSequenceClassification, AutoTokenizer
-    _HAS_ML_DEPS = True
-except ImportError:
-    torch = None  # type: ignore[assignment]
-    AutoModelForSequenceClassification = None  # type: ignore[assignment]
-    AutoTokenizer = None  # type: ignore[assignment]
-    _HAS_ML_DEPS = False
+import importlib.util
+_HAS_ML_DEPS = bool(importlib.util.find_spec("torch") and importlib.util.find_spec("transformers"))
+torch = AutoModelForSequenceClassification = AutoTokenizer = None
 
 logger = logging.getLogger("robinhood-agent.core.data.sentiment")
 
@@ -52,11 +46,12 @@ class SentimentModel:
         self.model_name = None
         self.id2label = None
         self.label2id = None
-        self._initialized = True
         self._load_model()
+        self._initialized = True
 
     def _load_model(self) -> None:
         """Load the sentiment model with fallback support."""
+        global torch,AutoModelForSequenceClassification,AutoTokenizer
         if not _HAS_ML_DEPS:
             raise RuntimeError(
                 "ML dependencies not installed (torch/transformers). "
@@ -64,6 +59,8 @@ class SentimentModel:
                 "The trading agent runs fine without them — only the weekly "
                 "sentiment ticker selection needs this stack."
             )
+        import torch
+        from transformers import AutoModelForSequenceClassification,AutoTokenizer
         # Determine device
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -163,8 +160,7 @@ class SentimentModel:
             return []
 
         if self.model is None or self.tokenizer is None:
-            logger.error("sentiment_model not loaded, returning neutral scores")
-            return [0.0] * len(headlines)
+            raise RuntimeError("sentiment model unavailable; no neutral placeholders")
 
         scores = []
 
@@ -195,8 +191,7 @@ class SentimentModel:
 
             except Exception as exc:
                 logger.warning("sentiment_model batch scoring failed: %s", exc)
-                # Fill with neutral for failed batch
-                scores.extend([0.0] * len(batch))
+                raise RuntimeError("sentiment batch failed; preserve last good selection") from exc
 
         return scores
 
@@ -209,6 +204,7 @@ class SentimentModel:
         """Return info about the loaded model."""
         return {
             "model_name": self.model_name,
+            "revision":getattr(getattr(self.model,"config",None),"_commit_hash",None),
             "device": str(self.device),
             "labels": self.id2label,
         }

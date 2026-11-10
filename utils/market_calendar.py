@@ -55,7 +55,7 @@ def is_market_open_at(now_utc: datetime | None = None) -> bool:
         now_et = now_utc.astimezone(_ET)
 
         if not _HAS_CALENDAR:
-            return _naive_open_check(now_et)
+            return False
 
         today = now_et.date()
         schedule = _NYSE.schedule(start_date=today.isoformat(), end_date=today.isoformat())
@@ -82,7 +82,7 @@ def is_trading_day_today(now_utc: datetime | None = None) -> bool:
             now_utc = now_utc.replace(tzinfo=timezone.utc)
         now_et = now_utc.astimezone(_ET)
         if not _HAS_CALENDAR:
-            return now_et.weekday() < 5
+            return False
         return not _NYSE.schedule(
             start_date=now_et.date().isoformat(), end_date=now_et.date().isoformat()
         ).empty

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +23,7 @@ logger = logging.getLogger("robinhood-agent.core.weekly.selector")
 class WeeklySelector:
     """Orchestrates weekly ticker selection based on sentiment analysis."""
 
-    def __init__(self, config: dict[str, Any]) -> None:
+    def __init__(self, config: dict[str, Any], position_manager=None) -> None:
         self.config = config
         self.logger = logger
         self.enabled = config.get("sentiment_selection", {}).get("enabled", False)
@@ -38,7 +39,7 @@ class WeeklySelector:
         self.selected_universe_path = self.data_dir / "selected_universe.json"
         self.candidate_universe_path = self.data_dir / "candidate_universe.json"
 
-        self.position_manager = PositionManager(config=config)
+        self.position_manager = position_manager if position_manager is not None else PositionManager(config=config)
         self.news_fetcher = WeeklyNewsFetcher(lookback_days=self.lookback_days)
         self.sentiment_model = None  # Lazy load
 
@@ -54,7 +55,7 @@ class WeeklySelector:
         # stays None and run_selection degrades safely (keeps the previous
         # universe) instead of crashing the whole agent.
         try:
-            self.sentiment_model = get_sentiment_model()
+            self.sentiment_model = await asyncio.to_thread(get_sentiment_model) if self.enabled else None
         except Exception as exc:
             self.logger.warning("sentiment_model_unavailable (%s) — weekly selection will keep previous universe", exc)
             self.sentiment_model = None
@@ -121,13 +122,15 @@ class WeeklySelector:
     def get_current_holdings(self) -> set[str]:
         """Get currently held tickers from position manager."""
         try:
+            if hasattr(self.position_manager,"reconciliation_ok") and not self.position_manager.reconciliation_ok:
+                raise RuntimeError("broker holdings not verified; retain previous selection")
             open_records = self.position_manager.get_open_records()
             held_tickers = {record.ticker for record in open_records if record.quantity > 0}
             self.logger.info("current_holdings count=%d tickers=%s", len(held_tickers), sorted(held_tickers))
             return held_tickers
         except Exception as exc:
             self.logger.error("Failed to get current holdings: %s", exc)
-            return set()
+            raise
 
     async def fetch_news_and_scores(self, tickers: list[str]) -> dict[str, float]:
         """Fetch news and score tickers.
@@ -142,6 +145,7 @@ class WeeklySelector:
              it never aborts the whole scoring pass.
         """
         self.logger.info("Fetching news for %d tickers...", len(tickers))
+        if self.sentiment_model is None:raise RuntimeError("sentiment model unavailable; retain previous selection")
         news_dict = await self.news_fetcher.fetch_news_for_universe(tickers)
 
         self.logger.info("Scoring news...")
@@ -158,12 +162,12 @@ class WeeklySelector:
                 continue
 
             try:
-                scores_list = self.sentiment_model.score_headlines(headlines)
+                scores_list = await asyncio.to_thread(self.sentiment_model.score_headlines,headlines)
                 # Ticker score = MEAN of per-headline sentiment scores
                 scores[ticker] = sum(scores_list) / len(scores_list) if scores_list else 0.0
             except Exception as exc:
                 self.logger.error("Failed to score %s: %s", ticker, exc)
-                scores[ticker] = 0.0
+                raise RuntimeError(f"sentiment inference failed for {ticker}; retain previous universe") from exc
 
         self.logger.info("Scored %d tickers", len(scores))
         return scores
@@ -214,10 +218,17 @@ class WeeklySelector:
 
             scores = await self.fetch_news_and_scores(all_candidates)
 
+            # The integrated contract counts NEW candidates independently of
+            # holdings. Standalone legacy callers keep their old contract.
+            discovery_cfg=self.config.get("discovery",{})
+            new_contract=bool(discovery_cfg.get("shortlist"))
+            if new_contract:
+                scores={t:s for t,s in scores.items() if t not in current_holdings}
+
             selected = select_universe(
-                held_tickers=current_holdings,
+                held_tickers=set() if new_contract else current_holdings,
                 scored_candidates=scores,
-                universe_size=self.universe_size,
+                universe_size=discovery_cfg["shortlist"]["new_candidate_count"] if new_contract else self.universe_size,
                 max_positions=self.max_positions,
                 min_sentiment_score=self.min_sentiment_score,
             )
@@ -291,12 +302,13 @@ class WeeklySelector:
 _weekly_selector: WeeklySelector | None = None
 
 
-async def get_weekly_selector(config: dict[str, Any]) -> WeeklySelector:
+async def get_weekly_selector(config: dict[str, Any],position_manager=None) -> WeeklySelector:
     """Get or create the weekly selector singleton."""
     global _weekly_selector
     if _weekly_selector is None:
-        _weekly_selector = WeeklySelector(config)
+        _weekly_selector = WeeklySelector(config,position_manager=position_manager)
         await _weekly_selector.initialize()
+    if position_manager is not None:_weekly_selector.position_manager=position_manager
     return _weekly_selector
 
 

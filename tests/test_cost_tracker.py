@@ -23,16 +23,16 @@ def _fresh_tracker() -> CostTracker:
 def test_exact_dashboard_formula():
     t = _fresh_tracker()
     t.set_pricing({"claude-sonnet-5-5": {"input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0}})
-    # input=1000 with 600 cache_create + 200 cache_read → regular input 200
+    # The API's input=1000 is uncached; cache categories are additional.
     usd = t.record("claude-sonnet-5-5", input_tokens=1000, output_tokens=500,
                    cache_creation_tokens=600, cache_read_tokens=200)
-    expected = (200 * 3.0 + 600 * 3.75 + 200 * 0.3 + 500 * 15.0) / 1_000_000
+    expected = (1000 * 3.0 + 600 * 3.75 + 200 * 0.3 + 500 * 15.0) / 1_000_000
     assert abs(usd - expected) < 1e-12
     # record file is append-only JSONL
     lines = t._records_path().read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
     rec = json.loads(lines[0])
-    assert rec["regular_input_tokens"] == 200
+    assert rec["regular_input_tokens"] == 1000
     assert abs(rec["estimated_usd"] - expected) < 1e-12
     # summary holds aggregates only
     summary = json.loads(t._summary_path().read_text(encoding="utf-8"))
@@ -44,7 +44,7 @@ def test_unknown_model_falls_back_to_star_rate():
     t = _fresh_tracker()
     t.set_pricing({"claude-sonnet-5-5": {"input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0}})
     usd = t.record("claude-mystery-future-9", input_tokens=1_000_000, output_tokens=0)
-    assert abs(usd - 3.0) < 1e-9  # falls to "*" rate (sonnet table)
+    assert usd is None  # unknown model is explicitly unpriced
 
 
 def test_no_enforcement_methods_exist():

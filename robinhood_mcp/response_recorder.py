@@ -35,7 +35,6 @@ import concurrent.futures
 import gzip as gzip_module
 import json
 import logging
-import os
 import re
 import shutil
 import traceback
@@ -1554,7 +1553,6 @@ def _build_direct_mcp_record(
             if text:
                 raw_text_parts.append(text)
     raw_text = "\n".join(raw_text_parts)
-    redacted_text = _redact_credentials(raw_text) if raw_text else ""
 
     if raw_text:
         try:
@@ -1562,23 +1560,10 @@ def _build_direct_mcp_record(
         except json.JSONDecodeError:
             parsed_payload = None
 
-    numeric_anomalies: list[dict[str, Any]] = []
-    if parsed_payload is not None:
-        try:
-            numeric_anomalies = _detect_numeric_anomalies(parsed_payload)
-        except Exception:
-            numeric_anomalies = []
-
-    # Redact arguments too — order-placing calls include real quantities/
-    # tickers which are fine to log, but if account_number or any future
-    # sensitive field appears in arguments, keep it out of the trace file
-    # in anything beyond a masked form.
-    safe_arguments = dict(arguments)
-    if "account_number" in safe_arguments and safe_arguments["account_number"]:
-        val = str(safe_arguments["account_number"])
-        safe_arguments["account_number"] = (
-            f"***{val[-4:]}" if len(val) > 4 else "****"
-        )
+    # Broker-controlled strings and error bodies may contain bare secrets.
+    # Retain transport metadata and JSON shape, never payload values.
+    safe_arguments = {key: "[REDACTED]" for key in arguments}
+    safe_exception = {"exception_class": exception_info.get("exception_class", "Error")} if exception_info else None
 
     record: dict[str, Any] = {
         "transport": "direct_mcp",
@@ -1589,11 +1574,11 @@ def _build_direct_mcp_record(
         "duration_ms": duration_ms,
         "attempt": attempt,
         "success": success,
-        "response_text_redacted": redacted_text[:5000] if redacted_text else None,
+        "response_text_redacted": None,
         "response_text_length_chars": len(raw_text),
         "json_parse_succeeded": parsed_payload is not None,
-        "numeric_anomalies": numeric_anomalies if numeric_anomalies else None,
-        "exception": exception_info,
+        "numeric_anomalies": None,
+        "exception": safe_exception,
     }
 
     if isinstance(parsed_payload, dict):

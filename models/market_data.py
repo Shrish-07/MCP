@@ -55,3 +55,5 @@ class EquityQuote(BaseModel):
     volume: float = Field(..., ge=0)
     prev_close: float = Field(..., ge=0)
     change_pct: float = 0.0
+    timestamp: str = ""
+    received_at: str = ""

@@ -21,3 +21,13 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.venv-upgrade/
+.test-tmp/
+data/replays/
+data/sentiment_history.json*
+data/discovery_shortlist*.json*
+data/discovery_features_latest.json*
+data/discovery_ranked_latest.json*
+data/features_*.json*
+data/catalyst_events.json*
+data/pead_events.json*

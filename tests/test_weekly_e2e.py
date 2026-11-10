@@ -239,14 +239,13 @@ async def test_e2e_empty_news_neutral_scores(base_config, tmp_path):
     selector.position_manager = _stub_holdings([])
 
     # Real fetch_news_and_scores with mocked fetcher returning empty news
-    from models.news import NewsItem
     selector.news_fetcher.fetch_news_for_universe = AsyncMock(
         return_value={"AAPL": [], "MSFT": [], "GOOGL": []}
     )
     selector.sentiment_model = None
 
-    scores = await selector.fetch_news_and_scores(["AAPL", "MSFT", "GOOGL"])
-    assert scores == {"AAPL": 0.0, "MSFT": 0.0, "GOOGL": 0.0}
+    with pytest.raises(RuntimeError):
+        await selector.fetch_news_and_scores(["AAPL", "MSFT", "GOOGL"])
 
 
 if __name__ == "__main__":

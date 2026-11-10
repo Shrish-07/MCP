@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 
 from models.news import NewsItem
-from utils.rate_limit import RateLimiter
+from utils.rate_limit import RateLimiter as RateLimiter,finnhub_limiter
 
 logger = logging.getLogger("robinhood-agent.core.weekly.news")
 
@@ -36,7 +36,7 @@ class WeeklyNewsFetcher:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._cache_file = self._cache_dir / "weekly_news_cache.json"
         self._cache = self._load_cache()
-        self._rate_limiter = RateLimiter(max_calls_per_minute=55)  # under 60 limit
+        self._rate_limiter = finnhub_limiter()
 
     def _load_cache(self) -> dict:
         """Load cached news data."""
@@ -70,6 +70,7 @@ class WeeklyNewsFetcher:
         symbol: str,
         from_date: date | None = None,
         to_date: date | None = None,
+        strict: bool = False,
     ) -> list[NewsItem]:
         """Fetch company news for a symbol with rate limiting, retries, and caching.
 
@@ -77,6 +78,7 @@ class WeeklyNewsFetcher:
         treat the ticker as neutral (score 0.0).
         """
         if not self._api_key:
+            if strict:raise RuntimeError("Finnhub credentials unavailable")
             self.logger.warning("weekly_news no FINNHUB_API_KEY set, returning empty")
             return []
 
@@ -110,7 +112,9 @@ class WeeklyNewsFetcher:
                         continue
                     response.raise_for_status()
                     data = response.json()
+                    if strict and not isinstance(data,list):raise ValueError("invalid news response")
                     items = self._parse_items(symbol, data)
+                    if strict and len(items)!=len(data):raise ValueError("partially malformed news response")
                     self._cache[cache_key] = {
                         "cached_at": datetime.now().isoformat(),
                         "items": [item.model_dump(mode="json") for item in items],
@@ -130,6 +134,7 @@ class WeeklyNewsFetcher:
                 await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
 
         self.logger.error("weekly_news_failed symbol=%s after %d attempts", symbol, self.max_retries)
+        if strict:raise RuntimeError(f"news fetch failed for {symbol}")
         return []
 
     def _parse_items(self, symbol: str, data: list) -> list[NewsItem]:

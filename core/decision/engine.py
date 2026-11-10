@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 
-from models.decisions import EXIT_REVIEW_RULES, DecisionType, TradeDecision, StructuredEdgeScore, CycleType
+from models.decisions import EXIT_REVIEW_RULES, DecisionType, TradeDecision, StructuredEdgeScore, CycleType, AddThesis
 from models.market_data import MarketMetrics
 from models.portfolio import Portfolio, PositionRecord
 from utils.anthropic_client import AnthropicClient, strip_fences
 from utils.journal_manager import JournalManager
 from utils.earnings_calendar import EarningsCalendar
 from core.position.manager import ExitSignal, PositionManager, position_snapshot
+from core.discovery.evidence import GUIDANCE
 
 
 class DecisionEngine:
@@ -259,7 +261,7 @@ Return only valid JSON with this schema (no markdown or extra text):
     "bear_thesis": "string — the specific condition that would
         invalidate the forward thesis, not just general risk factors.",
     "failure_conditions": ["string"],
-    "decision": "BUY|SELL|HOLD|IGNORE|ROTATE",
+    "decision": "BUY|SELL|HOLD|IGNORE|ROTATE|ADD_TO_POSITION",
     "action_type": "NEW|ADD|REDUCE|CLOSE|NONE",
     "rotate_from_ticker": null,
     "edge": {"catalyst_strength": 0.0, "technical_confirmation": 0.0, "portfolio_fit": 0.0},
@@ -291,6 +293,24 @@ Return only valid JSON with this schema (no markdown or extra text):
             .replace("{EDGE_THRESHOLD}", f"{self._edge_threshold:g}")
             .replace("{MAX_POSITIONS}", str(self._max_positions))
         )
+        _prompt_text += GUIDANCE+"""
+The objective is positive net expectancy over multi-day to multi-week holds.
+Hold valid winners while thesis and risk controls remain intact. Profit alone,
+elapsed time alone, or a lower share price is not a sell/add rationale.
+SELL has no entry-score threshold. Code-owned stops cannot be vetoed.
+ADD_TO_POSITION is distinct from BUY. For an existing broker-confirmed holding,
+compare ADD with HOLD, SELL and ROTATE. Assess concentration, averaging down,
+declining fundamentals, event/earnings gaps, liquidity, volatility, stale data,
+slippage and invalidation. Provide a defensible incremental thesis, new factual
+evidence, catalyst, counter-thesis, horizon, risks and explicit invalidations.
+An add requires add_thesis matching the following JSON schema; omit it for other
+actions. Never invent evidence IDs or timestamps. Requested size may be reduced
+or rejected by hard code-owned limits. A price fall alone is insufficient.
+Return portfolio_review with reasoned daily_entry_count_review, sector_review,
+and earnings_review strings when corresponding facts flag a soft review. The
+default soft reviews are two new entries/day, 30% sector exposure, and earnings
+window sizing. Soft reviews cannot override hard account/order/data/risk limits.
+""" + json.dumps(AddThesis.model_json_schema())
         self.system_prompt = [
             {
                 "type": "text",
@@ -322,11 +342,12 @@ Return only valid JSON with this schema (no markdown or extra text):
             if clamped_legacy != legacy:
                 self.logger.info("edge_total_clamped ticker=%s raw=%.3f clamped=%.3f",
                                  ticker, legacy, clamped_legacy)
-            return StructuredEdgeScore(total=clamped_legacy)
+            return StructuredEdgeScore(total=clamped_legacy if math.isfinite(legacy) else 0.)
 
         def _component(key: str, hi: float) -> float:
             try:
                 val = float(edge_obj.get(key, 0.0) or 0.0)
+                if not math.isfinite(val):val=0.
             except (TypeError, ValueError):
                 val = 0.0
             clamped = max(0.0, min(val, hi))
@@ -358,6 +379,7 @@ Return only valid JSON with this schema (no markdown or extra text):
         position_record: PositionRecord | None = None,
         open_positions_pnl: dict[str, float] | None = None,
         effective_buying_power: float | None = None,
+        evidence: dict | None = None,
     ) -> TradeDecision:
         """Review an exit signal and return a SELL or HOLD recommendation.
 
@@ -390,6 +412,8 @@ Return only valid JSON with this schema (no markdown or extra text):
             open_positions_pnl=open_positions_pnl,
             effective_buying_power=effective_buying_power,
         )
+        if evidence:
+            user_prompt += "\nFACTUAL EVIDENCE (orientation, not recommendation):\n"+json.dumps(evidence)
         try:
             response = await self.client.complete(self.system_prompt, user_prompt)
             payload = json.loads(strip_fences(response))
@@ -408,7 +432,11 @@ Return only valid JSON with this schema (no markdown or extra text):
                 reasoning_summary=str(payload.get("reasoning_summary", "")),
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 cycle_type=cycle_type.value if isinstance(cycle_type, CycleType) else str(cycle_type),
+                add_thesis=payload.get("add_thesis"),evidence=evidence or {},
+                portfolio_review=payload.get("portfolio_review") or {},
             )
+            if trade.decision not in (DecisionType.SELL,DecisionType.HOLD,DecisionType.ADD_TO_POSITION):
+                trade.decision=DecisionType.HOLD
             return trade
         except Exception as exc:
             self.logger.warning("exit_review_fallback ticker=%s error=%s", exit_signal.ticker, exc)
@@ -442,6 +470,7 @@ Return only valid JSON with this schema (no markdown or extra text):
         unrealized_pnl_pct: float = 0.0,
         days_held: int = 0,
         open_positions_pnl: dict[str, float] | None = None,
+        evidence: dict | None = None,
     ) -> TradeDecision:
         """Produce a BUY/HOLD/IGNORE/ROTATE recommendation for the requested ticker."""
         user_prompt = self._build_user_prompt_for_buy(
@@ -449,6 +478,8 @@ Return only valid JSON with this schema (no markdown or extra text):
             position_record=position_record, unrealized_pnl_pct=unrealized_pnl_pct, days_held=days_held,
             open_positions_pnl=open_positions_pnl,
         )
+        if evidence:
+            user_prompt += "\nDIVERGENCE EVIDENCE (facts; orientation, not recommendation):\n"+json.dumps(evidence)
         try:
             response = await self.client.complete(self.system_prompt, user_prompt)
             payload = json.loads(strip_fences(response))
@@ -467,6 +498,8 @@ Return only valid JSON with this schema (no markdown or extra text):
                 reasoning_summary=str(payload.get("reasoning_summary", "")),
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 cycle_type=cycle_type.value if isinstance(cycle_type, CycleType) else str(cycle_type),
+                add_thesis=payload.get("add_thesis"),evidence=evidence or {},
+                portfolio_review=payload.get("portfolio_review") or {},
             )
 
             # Enforce max open positions (decision-level safety hint; the
@@ -561,7 +594,7 @@ Return only valid JSON with this schema (no markdown or extra text):
             f"MARKET METRICS:\n{json.dumps(metrics.model_dump(mode='json'), indent=2)}\n\n"
             f"{account_line}\n"
             + EXIT_REVIEW_RULES + "\n"
-            + "Decide whether to HOLD or SELL.\n"
+            + "Decide HOLD, SELL, or a defended ADD_TO_POSITION with the required add_thesis schema.\n"
         )
 
     def _build_user_prompt_for_buy(
