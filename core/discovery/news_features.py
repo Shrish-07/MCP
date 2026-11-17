@@ -1,14 +1,15 @@
 """Persistent scored-story history, ticker-specific baseline and explicit coverage."""
 
+import asyncio
 import hashlib
 import json
 import math
 import re
 import statistics
-import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
+
 from utils.persistence import atomic_json
 
 
@@ -16,7 +17,7 @@ def story_keys(item):
     headline = re.sub(
         r"[^a-z0-9 ]", "", re.sub(r"\s+", " ", item.headline.lower())
     ).strip()
-    day = datetime.fromtimestamp(item.datetime, timezone.utc).date().isoformat()
+    day = datetime.fromtimestamp(item.datetime, UTC).date().isoformat()
     keys = {
         "headline:"
         + hashlib.sha256((headline + day + item.related.upper()).encode()).hexdigest()
@@ -49,29 +50,52 @@ def deduplicate(items):
 class NewsHistory:
     def __init__(self, path):
         self.path = Path(path)
+        self._state = None
+        self._dirty = set()
+
+    def flush(self):
+        if self._state is None or not self._dirty:
+            return
+        latest = (
+            json.loads(self.path.read_text()) if self.path.exists() else {"tickers": {}}
+        )
+        for ticker in self._dirty:
+            latest["tickers"][ticker] = self._state["tickers"][ticker]
+        atomic_json(self.path, latest)
+        self._dirty.clear()
 
     def update(
-        self, ticker, items, scores, model_info, *, now=None, coverage_start=None
+        self,
+        ticker,
+        items,
+        scores,
+        model_info,
+        *,
+        now=None,
+        coverage_start=None,
+        persist=True,
     ):
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         unique, dedup_count = deduplicate(items)
         if len(scores) != len(unique) or not all(
             isinstance(s, (int, float)) and math.isfinite(s) and -1 <= s <= 1
             for s in scores
         ):
             raise ValueError("incomplete/invalid sentiment inference")
-        state = (
-            json.loads(self.path.read_text()) if self.path.exists() else {"tickers": {}}
-        )
+        if self._state is None:
+            self._state = (
+                json.loads(self.path.read_text())
+                if self.path.exists()
+                else {"tickers": {}}
+            )
+        state = self._state
         old = state["tickers"].get(ticker, {"stories": [], "coverage_start": None})
         merged = {s["story_id"]: s for s in old["stories"]}
         for item, score in zip(unique, scores):
             story_id = min(story_keys(item))
             merged[story_id] = {
                 "story_id": story_id,
-                "timestamp": datetime.fromtimestamp(
-                    item.datetime, timezone.utc
-                ).isoformat(),
+                "timestamp": datetime.fromtimestamp(item.datetime, UTC).isoformat(),
                 "score": float(score),
                 "source": item.source,
                 "model": model_info,
@@ -89,14 +113,23 @@ class NewsHistory:
             s["model"].get("model_name") != model_info.get("model_name")
             for s in stories
         ):
-            raise ValueError("mixed sentiment model history; rescore window")
+            # Only freshly rescored stories can survive a model change.
+            fresh_ids = {min(story_keys(item)) for item in unique}
+            stories = [
+                story
+                for story in stories
+                if story["story_id"] in fresh_ids
+                and story["model"].get("model_name") == model_info.get("model_name")
+            ]
         state["tickers"][ticker] = {
             "stories": stories,
             "coverage_start": start,
             "last_fetch": now.isoformat(),
             "model": model_info,
         }
-        atomic_json(self.path, state)
+        self._dirty.add(ticker)
+        if persist:
+            self.flush()
         current = [
             s
             for s in stories
@@ -126,22 +159,47 @@ class NewsHistory:
         ]
         mean = sum(s["score"] * w for s, w in zip(current, weights)) / sum(weights)
         prior_mean = sum(s["score"] for s in prior) / len(prior)
-        historical_deltas=[]
-        for offset in range(1,31):
-            end=now-timedelta(days=offset)
-            a=[s for s in stories if end-timedelta(days=7)<=datetime.fromisoformat(s["timestamp"])<end]
-            b=[s for s in stories if end-timedelta(days=14)<=datetime.fromisoformat(s["timestamp"])<end-timedelta(days=7)]
+        historical_deltas = []
+        for offset in range(1, 31):
+            end = now - timedelta(days=offset)
+            a = [
+                s
+                for s in stories
+                if end - timedelta(days=7)
+                <= datetime.fromisoformat(s["timestamp"])
+                < end
+            ]
+            b = [
+                s
+                for s in stories
+                if end - timedelta(days=14)
+                <= datetime.fromisoformat(s["timestamp"])
+                < end - timedelta(days=7)
+            ]
             if a and b:
-                aw=[2 if datetime.fromisoformat(s["timestamp"])>=end-timedelta(days=3) else 1 for s in a]
-                historical_deltas.append(sum(s["score"]*w for s,w in zip(a,aw))/sum(aw)-statistics.mean(s["score"] for s in b))
-        delta_z=None
-        if len(historical_deltas)>=10 and statistics.pstdev(historical_deltas)>1e-9:
-            delta_z=((mean-prior_mean)-statistics.mean(historical_deltas))/statistics.pstdev(historical_deltas)
+                aw = [
+                    2
+                    if datetime.fromisoformat(s["timestamp"]) >= end - timedelta(days=3)
+                    else 1
+                    for s in a
+                ]
+                historical_deltas.append(
+                    sum(s["score"] * w for s, w in zip(a, aw)) / sum(aw)
+                    - statistics.mean(s["score"] for s in b)
+                )
+        delta_z = None
+        if len(historical_deltas) >= 10 and statistics.pstdev(historical_deltas) > 1e-9:
+            delta_z = (
+                (mean - prior_mean) - statistics.mean(historical_deltas)
+            ) / statistics.pstdev(historical_deltas)
         return {
             "sentiment_mean": mean,
             "sentiment_delta": mean - prior_mean,
-            "z_components":{"sentiment_delta":delta_z},
-            "delta_standardization":{"reference":"ticker preceding30 daily seven-day deltas; overlapping windows", "samples":len(historical_deltas)},
+            "z_components": {"sentiment_delta": delta_z},
+            "delta_standardization": {
+                "reference": "ticker preceding30 daily seven-day deltas; overlapping windows",
+                "samples": len(historical_deltas),
+            },
             "news_velocity": (len(current) / 7) / (len(baseline) / 30),
             "recent_negative_tone": mean < 0,
             "distinct_headlines": len(current),
@@ -158,11 +216,19 @@ class NewsHistory:
         }
 
 
-async def collect_news_features(history,fetcher,model,ticker,*,now=None):
-    now=now or datetime.now(timezone.utc);start=now-timedelta(days=45)
-    info=model.get_model_info()
-    if not info.get("model_name"):raise ValueError("model identity unavailable")
-    items=await fetcher.fetch_company_news(ticker,from_date=start.date(),to_date=now.date(),strict=True)
-    unique,_=deduplicate(items)
-    scores=await asyncio.to_thread(model.score_headlines,[n.headline for n in unique])
-    return history.update(ticker,items,scores,info,now=now,coverage_start=start.isoformat())
+async def collect_news_features(history, fetcher, model, ticker, *, now=None):
+    now = now or datetime.now(UTC)
+    start = now - timedelta(days=45)
+    info = model.get_model_info()
+    if not info.get("model_name"):
+        raise ValueError("model identity unavailable")
+    items = await fetcher.fetch_company_news(
+        ticker, from_date=start.date(), to_date=now.date(), strict=True
+    )
+    unique, _ = deduplicate(items)
+    scores = await asyncio.to_thread(
+        model.score_headlines, [n.headline for n in unique]
+    )
+    return history.update(
+        ticker, items, scores, info, now=now, coverage_start=start.isoformat()
+    )

@@ -1,18 +1,20 @@
-from datetime import datetime, timezone, timedelta
 import copy
+from datetime import UTC, datetime, timedelta
+
 import pytest
-from core.exits.triggers import (
-    gap_progress,
-    trend_break,
-    climax,
-    pead,
-    nightly_signals,
-    monitor_advisories,
-    abnormal_curve,
-)
-from core.exits.exit_state import finish_review
-from models.market_data import OHLCVBar
 from test_exits import record
+
+from core.exits.exit_state import finish_review
+from core.exits.triggers import (
+    abnormal_curve,
+    climax,
+    gap_progress,
+    monitor_advisories,
+    nightly_signals,
+    pead,
+    trend_break,
+)
+from models.market_data import OHLCVBar
 from utils.strategy_config import DEFAULTS
 
 
@@ -79,7 +81,7 @@ def test_pead_unavailable_small_negative_and_no_lookahead():
     }
     history = [
         {
-            "event_id":f"historical-{j}",
+            "event_id": f"historical-{j}",
             "available_at": "2026-09-01T00:00:00+00:00",
             "source": "verified",
             "surprise": 0.11,
@@ -103,7 +105,7 @@ def test_drop_and_new_high_debounce_recovery_rearm():
     r = record()
     r.peak_price = 110
     r.atr14 = 2
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     settings = copy.deepcopy(DEFAULTS)
     monitor_advisories(r, 103, settings, now=now)
     first = len(r.last_trigger_ids)

@@ -1,9 +1,10 @@
 """N new names, never a holdings quota. Retain last good output on failure."""
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
+
 from utils.persistence import atomic_json
 
 
@@ -38,7 +39,7 @@ def publish(path, candidates, metadata):
     previous = json.loads(path.read_text()) if path.exists() else {}
     payload = {
         "run_id": str(uuid4()),
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "status": "SUCCESS",
         "new_candidates": candidates,
         "history": (previous.get("history", []) + [[c["ticker"] for c in candidates]])[
@@ -60,7 +61,7 @@ def mark_failed(path, error):
         {
             "status": "FAILED",
             "error": str(error),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "previous_shortlist_retained": Path(path).exists(),
         },
     )
@@ -69,7 +70,7 @@ def mark_failed(path, error):
 def load_shortlist(path, max_age_days=8):
     value = json.loads(Path(path).read_text())
     age = (
-        datetime.now(timezone.utc) - datetime.fromisoformat(value["generated_at"])
+        datetime.now(UTC) - datetime.fromisoformat(value["generated_at"])
     ).total_seconds() / 86400
     if not 0 <= age <= max_age_days or value["status"] != "SUCCESS":
         raise ValueError("stale/invalid shortlist")

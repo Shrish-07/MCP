@@ -1,0 +1,87 @@
+{
+  "ruff": {
+    "command": "python -B -m ruff check . --no-cache",
+    "exit": 0,
+    "output": "All checks passed!\n"
+  },
+  "format": {
+    "command": "python -B -m ruff format . --check --no-cache",
+    "exit": 0,
+    "output": "124 files already formatted\n"
+  },
+  "static_import_names": {
+    "command": "python -B -m ruff check . --select F --no-cache",
+    "exit": 0,
+    "output": "All checks passed!\n"
+  },
+  "dependencies": {
+    "command": "python -B -m pip check",
+    "exit": 0,
+    "output": "No broken requirements found.\n"
+  },
+  "preflight": {
+    "command": "python -B scripts/preflight.py",
+    "exit": 0,
+    "output": "{\n  \"python\": \"3.13.6\",\n  \"dry_run\": true,\n  \"discovery_enabled\": false,\n  \"legacy_sentiment_selection_enabled\": true,\n  \"live_release_approved\": false,\n  \"configuration_errors\": [],\n  \"state_load_error\": null,\n  \"local_positions\": 0,\n  \"legacy_state_present\": false,\n  \"account_binding_present\": true,\n  \"unresolved_local_intents\": 0,\n  \"sentiment_dependencies_installed\": true,\n  \"local_validation_passed\": true,\n  \"live_ready\": false,\n  \"provider_billing_reconciliation\": \"Pending after real usage; does not block local operation.\",\n  \"requires_runtime_evidence\": [\n    \"Broker reconciliation on startup\",\n    \"Current process identity and heartbeat after startup\",\n    \"Explicit owner-controlled live activation\"\n  ],\n  \"no_waiting_period\": \"No fixed trial period, minimum trade count or automatic exposure ramp.\"\n}\n"
+  },
+  "health": {
+    "command": "python -B scripts/healthcheck.py",
+    "exit": 1,
+    "output": "{\"status\": \"PROCESS_ABSENT\", \"healthy\": false, \"reason\": \"No backend health state\"}\n"
+  },
+  "compilation": {
+    "exit": 0,
+    "files": 113,
+    "method": "In-memory compile of all active application, script and test sources; no bytecode writes"
+  },
+  "baseline": {
+    "branch": "Shrish-07-changes",
+    "head": "e81a48ffc859d4f2df671d2d205626229237f991",
+    "initial_status": " M CONTRIBUTING.md\n M README.md\n M SECURITY.md\n M core/attribution.py\n M core/backend.py\n M core/data/__init__.py\n M core/data/ingest.py\n M core/data/metrics.py\n M core/data/news.py\n M core/data/sentiment.py\n M core/data_ingest.py\n M core/decision/__init__.py\n M core/decision/engine.py\n M core/decision_engine.py\n M core/discovery/catalysts.py\n M core/discovery/divergence.py\n M core/discovery/evidence.py\n M core/discovery/features.py\n M core/discovery/gates.py\n M core/discovery/news_features.py\n M core/discovery/pipeline.py\n M core/discovery/shortlist.py\n M core/discovery/universe.py\n M core/evaluation.py\n M core/execution/engine.py\n M core/exits/exit_evidence.py\n M core/exits/exit_state.py\n M core/exits/pead_ingestion.py\n M core/exits/trail_manager.py\n M core/exits/triggers.py\n M core/metrics.py\n M core/news_fetch.py\n M core/pnl_tracker.py\n M core/position/__init__.py\n M core/position/manager.py\n M core/position/pnl_tracker.py\n M core/position_manager.py\n M core/sentiment_model.py\n M core/simulation.py\n M core/ticker_selector.py\n M core/weekly/__init__.py\n M core/weekly/news.py\n M core/weekly/selector.py\n M core/weekly/ticker_selector.py\n M core/weekly_news.py\n M core/weekly_selector.py\n D docs/BASELINE.json\n M docs/END_TO_END.md\n M docs/PRODUCTION_READINESS_AUDIT.md\n D docs/history/README_pre_swing_upgrade.md\n M docs/verification/README.md\n D docs/verification/pipeline_verified_2026-11-10.png\n D docs/verification/preflight_2026-11-10.txt\n M main.py\n M models/__init__.py\n M models/decisions.py\n M models/news.py\n M models/orders.py\n M models/portfolio.py\n M requirements-ml.txt\n M robinhood_mcp/response_recorder.py\n M robinhood_mcp/robinhood_client.py\n M scripts/evaluate_discovery.py\n M scripts/healthcheck.py\n M scripts/ingest_pead.py\n M scripts/preflight.py\n M scripts/probe_broker.py\n M scripts/reconcile_costs.py\n D scripts/record_baseline.py\n M scripts/refresh_universe.py\n M scripts/replay_archived.py\n M scripts/smoke_cycle.py\n M scripts/verify_weekly_layer.py\n M tests/conftest.py\n M tests/test_add.py\n M tests/test_attribution.py\n M tests/test_backend_safety.py\n M tests/test_config_loader.py\n M tests/test_cost_tracker.py\n M tests/test_cost_v2.py\n M tests/test_discovery.py\n M tests/test_evaluation_deployment.py\n M tests/test_event_ingestion.py\n M tests/test_execution_guards.py\n M tests/test_exits.py\n M tests/test_mcp_state_contract.py\n M tests/test_optional_failures.py\n M tests/test_p0_safety.py\n M tests/test_parsing.py\n M tests/test_position_logic.py\n M tests/test_production_integrity.py\n M tests/test_release_guards.py\n M tests/test_rotation.py\n M tests/test_sentiment.py\n M tests/test_sentiment_unit.py\n M tests/test_strategic_exits.py\n M tests/test_ticker_selector.py\n M tests/test_weekly_e2e.py\n M utils/anthropic_client.py\n M utils/config.py\n M utils/cost_tracker.py\n M utils/earnings_calendar.py\n M utils/freshness.py\n M utils/health.py\n M utils/instance_lock.py\n M utils/journal_manager.py\n M utils/locks.py\n M utils/logger.py\n M utils/market_calendar.py\n M utils/persistence.py\n M utils/rate_limit.py\n M utils/strategy_config.py\n?? docs/AUTHENTICATION.md\n?? docs/DEPLOYMENT.md\n?? docs/verification/account_state_2026-11-12.json\n?? docs/verification/checks_2026-11-12.json\n?? docs/verification/checks_clean_reset_2026-11-12.json\n?? docs/verification/clean_state_reset_2026-11-12.json\n?? docs/verification/journal_cleanup_2026-11-12.json\n?? docs/verification/local_models_reset_2026-11-12.json\n?? docs/verification/preflight_2026-11-12.json\n?? docs/verification/preflight_clean_reset_2026-11-12.json\n?? docs/verification/provider_accounting_reset_2026-11-12.txt\n?? docs/verification/pytest_2026-11-12.txt\n?? docs/verification/pytest_clean_reset_2026-11-12.txt\n?? docs/verification/pytest_clean_reset_complete_2026-11-12.txt\n?? docs/verification/pytest_clean_reset_final_2026-11-12.txt\n?? docs/verification/pytest_clean_reset_verified_2026-11-12.txt\n?? docs/verification/reset_local_2026-11-12.json\n?? docs/verification/run_offline_audit_2026-11-12.py\n?? scripts/reset_local_context.py\n?? tests/test_clean_reset.py\n?? tests/test_final_readiness.py\n?? tests/test_provider_accounting.py\n?? utils/state_reset.py\n",
+    "changes_among_baselined_files": [
+      "main.py",
+      "core\\backend.py",
+      "core\\execution\\engine.py",
+      "utils\\freshness.py",
+      "tests\\test_production_integrity.py",
+      "README.md"
+    ],
+    "configuration_unchanged": true
+  },
+  "docker_installed": false,
+  "offline_guard_ast_unchanged": true,
+  "constraints": {
+    "normal_agent_started": false,
+    "broker_requests": 0,
+    "broker_mutations": 0,
+    "paid_api_calls": 0,
+    "credential_reads_or_writes": 0,
+    "commits_or_pushes": 0
+  },
+  "full_tests": {
+    "passed": 243,
+    "warnings": 1,
+    "seconds": 14.17,
+    "exit": 0,
+    "output_file": "pytest_monday_2026-11-15.txt"
+  },
+  "focused_tests": {
+    "passed": 107,
+    "warnings": 1,
+    "seconds": 5.04,
+    "exit": 0,
+    "output_file": "pytest_monday_targeted_2026-11-15.txt"
+  },
+  "diff_check": {
+    "exit": 0,
+    "output": ""
+  },
+  "final_safety": {
+    "head_unchanged": true,
+    "configuration_hash_unchanged": true
+  },
+  "monday_session": {
+    "market_open": "2026-11-16 14:30:00+00:00",
+    "market_close": "2026-11-16 21:00:00+00:00"
+  }
+}

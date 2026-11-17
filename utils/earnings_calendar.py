@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime, timezone, date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 
@@ -25,7 +25,7 @@ class EarningsCalendar:
             self.logger.warning("earnings_calendar no mcp_client set, skipping refresh")
             return
         try:
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
             parsed = await self.mcp_client.get_earnings_calendar_window(
                 start_date=today, days=14
             )
@@ -38,25 +38,33 @@ class EarningsCalendar:
                     continue
                 report = ev.get("report", {})
                 eps = ev.get("eps", {})
-                entries.append({
-                    "ticker": symbol,
-                    "date": report.get("date", ""),
-                    "time": "AMC" if report.get("timing") == "pm" else "BMO",
-                    "verified": report.get("verified", False),
-                    "eps_estimate": eps.get("estimate"),
-                    "eps_actual": eps.get("actual"),
-                })
+                entries.append(
+                    {
+                        "ticker": symbol,
+                        "date": report.get("date", ""),
+                        "time": "AMC" if report.get("timing") == "pm" else "BMO",
+                        "verified": report.get("verified", False),
+                        "eps_estimate": eps.get("estimate"),
+                        "eps_actual": eps.get("actual"),
+                    }
+                )
             cache = {
-                "refreshed_at": datetime.now(timezone.utc).isoformat(),
+                "refreshed_at": datetime.now(UTC).isoformat(),
                 "source": "robinhood_mcp_direct",
                 "entries": entries,
             }
             self.cache_path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
             self.logger.info("earnings_calendar refreshed count=%d", len(entries))
         except Exception as exc:
-            self.logger.warning("earnings_calendar_refresh_failed: %s", exc)
+            self.logger.exception(
+                "earnings_calendar_refresh_failed: %s",
+                type(exc).__name__,
+                exc_info=False,
+            )
 
-    def get_upcoming(self, ticker: str, within_days: int = 5, after_days: int = 3) -> dict | None:
+    def get_upcoming(
+        self, ticker: str, within_days: int = 5, after_days: int = 3
+    ) -> dict | None:
         """Return earnings entry if ticker has earnings within the configured window, else None.
 
         Window covers `within_days` days BEFORE the report through `after_days`
@@ -65,7 +73,7 @@ class EarningsCalendar:
         """
         try:
             cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
-            today = datetime.now(timezone.utc).date()
+            today = datetime.now(UTC).date()
             for entry in cache.get("entries", []):
                 if entry.get("ticker", "").upper() != ticker.upper():
                     continue
@@ -78,16 +86,23 @@ class EarningsCalendar:
                         return {**entry, "days_away": days_away}
                 except (ValueError, KeyError):
                     continue
-        except Exception:
-            pass
+        except Exception as error:
+            logging.getLogger(__name__).exception(
+                "Handled failure type=%s", type(error).__name__, exc_info=False
+            )
         return None
 
-    def is_in_earnings_window(self, ticker: str, within_days: int = 5, after_days: int = 3) -> bool:
+    def is_in_earnings_window(
+        self, ticker: str, within_days: int = 5, after_days: int = 3
+    ) -> bool:
         """Cheap boolean check: is this ticker inside the earnings window right now?
 
         INFORMATIONAL ONLY — never used as a hard BUY/SELL gate.
         """
-        return self.get_upcoming(ticker, within_days=within_days, after_days=after_days) is not None
+        return (
+            self.get_upcoming(ticker, within_days=within_days, after_days=after_days)
+            is not None
+        )
 
     def earnings_window_for_prompt(self, ticker: str) -> str:
         """Return a short opportunity-review block when the ticker is in the

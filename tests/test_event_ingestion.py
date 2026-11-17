@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -30,7 +30,7 @@ async def test_catalog_ingests_only_verified_reported_earnings(tmp_path):
         broker,
         tmp_path / "catalyst_events.json",
         {"ABC", "DEF"},
-        now=datetime(2026, 11, 10, 22, tzinfo=timezone.utc),
+        now=datetime(2026, 11, 10, 22, tzinfo=UTC),
     )
     assert set(rows) == {"ABC"}
     assert rows["ABC"]["timestamp_basis"] == "observation_time"
@@ -55,7 +55,7 @@ def test_pead_import_aligns_closes_and_rejects_post_release_consensus():
             "2026-11-10": 106,
         },
     }
-    cutoff = datetime(2026, 11, 10, 22, tzinfo=timezone.utc)
+    cutoff = datetime(2026, 11, 10, 22, tzinfo=UTC)
     data = build_pead_snapshot(
         {
             "source": "fixture",

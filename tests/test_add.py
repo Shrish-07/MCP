@@ -1,13 +1,15 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
+
 import pytest
-from models.decisions import AddThesis, ExecutionResult
+from test_p0_safety import decision, portfolio, seed
+
 from core.execution.engine import ExecutionEngine
-from test_p0_safety import seed, portfolio, decision
+from models.decisions import AddThesis, ExecutionResult
 
 
 def defended():
-    stamp = datetime.now(timezone.utc).isoformat()
+    stamp = datetime.now(UTC).isoformat()
     return AddThesis(
         existing_position_confirmed=True,
         thesis_still_valid=True,
@@ -98,14 +100,14 @@ async def test_bad_add_rejected(pm, change, reason):
     if change == "count":
         r.adds_count = 1
     if change == "cooldown":
-        r.last_add_timestamp = datetime.now(timezone.utc).isoformat()
+        r.last_add_timestamp = datetime.now(UTC).isoformat()
     pm.update_record(r)
     result = await e.execute(d, portfolio(), 100, True, avg_volume_30d=1e6)
     assert result.status == "REJECTED_ADD_" + reason
 
 
 def test_add_partial_fills_count_once_and_preserve_anchor(pm):
-    e, d = setup(pm)
+    _e, d = setup(pm)
     r = pm.get_open_records()[0]
     r.peak_price = 120
     r.trail_stop_px = 110

@@ -7,6 +7,7 @@ Public helpers:
   - strip_fences(text): canonical ```json fence remover (single source of
     truth; core/decision/engine.py and main.py import this).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -29,8 +30,13 @@ def strip_fences(text: str) -> str:
 class AnthropicClient:
     """Async Anthropic client wrapper with retry and cost tracking."""
 
-    def __init__(self, model: str, max_tokens: int = 4096,
-                 send_temperature: bool = False, temperature: float = 0.1) -> None:
+    def __init__(
+        self,
+        model: str,
+        max_tokens: int = 4096,
+        send_temperature: bool = False,
+        temperature: float = 0.1,
+    ) -> None:
         self.model = model
         self.max_tokens = max_tokens
         # New-generation models reject the temperature parameter entirely;
@@ -64,7 +70,8 @@ class AnthropicClient:
                     request_kwargs["temperature"] = self.temperature
                 response = await self.client.messages.create(**request_kwargs)
                 text = "".join(
-                    block.text for block in getattr(response, "content", [])
+                    block.text
+                    for block in getattr(response, "content", [])
                     if getattr(block, "type", "") == "text"
                 )
                 usage = getattr(response, "usage", None)
@@ -73,24 +80,46 @@ class AnthropicClient:
                     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
                     try:
                         self.cost_tracker.record(
-                            getattr(response, "model", self.model), usage.input_tokens, usage.output_tokens,
-                            cache_creation_tokens=cache_create, cache_read_tokens=cache_read,
-                            raw_usage=usage.model_dump(mode="json"), request_id=getattr(response, "id", None))
+                            getattr(response, "model", self.model),
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            cache_creation_tokens=cache_create,
+                            cache_read_tokens=cache_read,
+                            raw_usage=usage.model_dump(mode="json"),
+                            request_id=getattr(response, "id", None),
+                        )
                     except Exception as exc:
                         # A ledger failure must not retry an already billed API request.
-                        self.logger.error("cost_observability_failed error=%s", exc)
+                        self.logger.exception(
+                            "cost_observability_failed error=%s",
+                            type(exc).__name__,
+                            exc_info=False,
+                        )
                 else:
-                    self._record_unpriced("usage unavailable", getattr(response, "id", None))
+                    self._record_unpriced(
+                        "usage unavailable", getattr(response, "id", None)
+                    )
                 return strip_fences(text)
             except Exception as exc:
                 last_error = exc
                 if self.client is not None:
-                    self._record_unpriced(type(exc).__name__, getattr(exc, "request_id", None))
+                    self._record_unpriced(
+                        type(exc).__name__, getattr(exc, "request_id", None)
+                    )
                 if self._is_retryable(exc) and attempt < 3:
-                    self.logger.warning("anthropic_retry attempt=%d error=%s", attempt, exc)
+                    self.logger.warning(
+                        "anthropic_retry attempt=%d error=%s",
+                        attempt,
+                        type(exc).__name__,
+                    )
                     await asyncio.sleep(5)
                     continue
-                self.logger.exception("anthropic_completion_failed model=%s: %s", self.model, exc)
+                self.logger.exception(
+                    "anthropic_completion_failed model=%s: %s",
+                    self.model,
+                    type(exc).__name__,
+                    exc_info=False,
+                )
                 raise RuntimeError("Anthropic API request failed") from exc
         raise RuntimeError("Anthropic API request failed") from last_error
 
@@ -103,4 +132,8 @@ class AnthropicClient:
     @staticmethod
     def _is_retryable(exc: Exception) -> bool:
         message = str(exc).lower()
-        return "rate limit" in message or "529" in message or "too many requests" in message
+        return (
+            "rate limit" in message
+            or "529" in message
+            or "too many requests" in message
+        )

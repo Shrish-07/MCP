@@ -138,13 +138,14 @@ def validate(settings):
                 walk(default, value, path)
             elif isinstance(default, bool) and not isinstance(value, bool):
                 errors.append(path + ": boolean required")
-            elif isinstance(default, (int, float)) and not isinstance(default, bool):
-                if (
-                    isinstance(value, bool)
-                    or not isinstance(value, (int, float))
-                    or not math.isfinite(value)
-                ):
-                    errors.append(path + ": finite number required")
+            elif (
+                isinstance(default, (int, float)) and not isinstance(default, bool)
+            ) and (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                errors.append(path + ": finite number required")
 
     walk(DEFAULTS, settings, "config")
     if errors:
@@ -186,8 +187,8 @@ def validate(settings):
     ):
         if d["gates"][key] <= 0:
             errors.append("discovery.gates." + key)
-    if e["partial_take"]["enabled"]:
-        errors.append("partial exits are not released")
+    if not 0 < e["partial_take"]["fraction"] <= 1:
+        errors.append("partial exit fraction")
     if settings["execution"]["extended_hours_enabled"]:
         errors.append("extended-hours MCP contract is unverified")
     return errors

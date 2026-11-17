@@ -2,17 +2,19 @@
 
 import asyncio
 import json
-from datetime import datetime, timezone, timedelta
+import logging
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from .universe import load_universe, refresh
-from .features import technical_features
-from .gates import eligibility
-from .divergence import score_cohort
-from .shortlist import publish, mark_failed
-from .shortlist import select_new
-from .news_features import NewsHistory, deduplicate
+
 from core.exits.trail_manager import completed_bars
 from utils.persistence import atomic_json
+
+from .divergence import score_cohort
+from .features import technical_features
+from .gates import eligibility
+from .news_features import NewsHistory, deduplicate
+from .shortlist import mark_failed, publish, select_new
+from .universe import load_universe, refresh
 
 
 class Discovery:
@@ -28,13 +30,19 @@ class Discovery:
         )
         self.feature_path = self.root / "data/discovery_features_latest.json"
         self.path = self.root / self.cfg["shortlist_file"]
-        self.inference_lock=asyncio.Lock()
+        self.inference_lock = asyncio.Lock()
 
-    async def news_for(self,ticker):
+    async def news_for(self, ticker):
         from .news_features import collect_news_features
+
         async with self.inference_lock:
-            model=await asyncio.to_thread(self.model_loader)
-            return await collect_news_features(NewsHistory(self.root/"data/sentiment_history.json"),self.news_fetcher,model,ticker)
+            model = await asyncio.to_thread(self.model_loader)
+            return await collect_news_features(
+                NewsHistory(self.root / "data/sentiment_history.json"),
+                self.news_fetcher,
+                model,
+                ticker,
+            )
 
     async def features(self):
         if not self.cfg["enabled"]:
@@ -62,7 +70,7 @@ class Discovery:
                     excluded[ticker] = [str(exc)]
         if len(rows) < self.cfg["min_cohort"]:
             raise ValueError("insufficient valid feature cohort")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         payload = {
             "generated_at": now,
             "universe_version": universe["version"],
@@ -88,12 +96,15 @@ class Discovery:
                 raise ValueError("model identity unavailable")
             history = NewsHistory(self.root / "data/sentiment_history.json")
             rows = {}
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             start = now - timedelta(days=45)
             catalyst_path = self.root / "data/catalyst_events.json"
             from .catalysts import refresh_catalysts
+
             try:
-                catalysts = await refresh_catalysts(self.client, catalyst_path, features["rows"], now=now)
+                catalysts = await refresh_catalysts(
+                    self.client, catalyst_path, features["rows"], now=now
+                )
             except (ValueError, RuntimeError, OSError):
                 catalysts = {}
             for ticker, technical in features["rows"].items():
@@ -112,6 +123,7 @@ class Discovery:
                         info,
                         now=now,
                         coverage_start=start.isoformat(),
+                        persist=False,
                     )
                 except ValueError as exc:
                     if "sparse ticker" in str(exc):
@@ -134,6 +146,7 @@ class Discovery:
                     **news,
                     confirmed_catalyst=catalyst if confirmed else None,
                 )
+            history.flush()
             if len(rows) < self.cfg["min_cohort"]:
                 raise ValueError("insufficient valid news cohort")
             reference = "cross-sectional-v1:" + now.isoformat()
@@ -165,5 +178,8 @@ class Discovery:
             atomic_json(self.root / "data/discovery_ranked_latest.json", result)
             return result
         except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "Handled failure type=%s", type(exc).__name__, exc_info=False
+            )
             mark_failed(self.path, exc)
             raise

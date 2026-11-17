@@ -1,17 +1,21 @@
-import json, math, statistics
-from datetime import datetime, timezone, timedelta
+import json
+import math
+import statistics
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
 import pytest
-from core.discovery.divergence import standardize, score_cohort, score_fixed_reference
-from core.discovery.shortlist import select_new, publish, mark_failed, load_shortlist
-from core.discovery.gates import eligibility
-from core.discovery.news_features import deduplicate, NewsHistory
-from core.discovery.universe import load_universe
+
+from core.discovery.divergence import score_cohort, score_fixed_reference, standardize
 from core.discovery.features import technical_features
+from core.discovery.gates import eligibility
+from core.discovery.news_features import NewsHistory, deduplicate
+from core.discovery.shortlist import load_shortlist, mark_failed, publish, select_new
+from core.discovery.universe import load_universe
 from core.exits.trail_manager import completed_bars
-from utils.strategy_config import DEFAULTS
-from models.news import NewsItem
 from models.market_data import EquityQuote, OHLCVBar
+from models.news import NewsItem
+from utils.strategy_config import DEFAULTS
 
 
 def cohort():
@@ -77,8 +81,10 @@ def test_failed_ranking_preserves_previous_shortlist(tmp_path):
 
 def test_universe_source_hash_and_staleness():
     root = Path(__file__).resolve().parents[1]
-    source=json.loads((root/"data/sp500_universe.json").read_text())
-    v = load_universe(root / "data/sp500_universe.json",now=datetime.fromisoformat(source["as_of"]))
+    source = json.loads((root / "data/sp500_universe.json").read_text())
+    v = load_universe(
+        root / "data/sp500_universe.json", now=datetime.fromisoformat(source["as_of"])
+    )
     assert 480 <= len(v["constituents"]) <= 520 and v["version"] and v["source"]
     with pytest.raises(ValueError):
         load_universe(
@@ -95,7 +101,7 @@ def test_liquidity_price_volatility_boundaries():
         ask=5,
         volume=1,
         prev_close=5,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
     )
     f = {"price": 5, "dollar_volume30": 75e6, "vol30_annual_pct": 120, "bar_count": 250}
     cfg = DEFAULTS["discovery"]["gates"]
@@ -126,7 +132,7 @@ def test_technical_features_completed_sessions_and_missing_history():
                 volume=1e6,
             )
         )
-    now = datetime(2026, 11, 7, tzinfo=timezone.utc)
+    now = datetime(2026, 11, 7, tzinfo=UTC)
     valid = completed_bars(bars, now)
     f = technical_features(valid, DEFAULTS["discovery"])
     assert (
@@ -144,7 +150,7 @@ def test_technical_features_completed_sessions_and_missing_history():
 
 
 def story(i, days, headline=None):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return NewsItem(
         id=i,
         headline=headline or f"ABC measured event {i}",
@@ -168,7 +174,7 @@ def test_syndication_dedup_and_news_baseline(tmp_path):
         items,
         scores,
         {"model_name": "test-primary"},
-        coverage_start=(datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),
+        coverage_start=(datetime.now(UTC) - timedelta(days=45)).isoformat(),
     )
     assert (
         f["sentiment_mean"] == 0.2
@@ -189,5 +195,5 @@ def test_sparse_or_new_ticker_has_no_neutral_baseline(tmp_path):
             [],
             [],
             {"model_name": "test"},
-            coverage_start=datetime.now(timezone.utc).isoformat(),
+            coverage_start=datetime.now(UTC).isoformat(),
         )

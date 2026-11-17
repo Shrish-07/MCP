@@ -39,21 +39,21 @@ import re
 import shutil
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 # ------------------------------------------------------------------ #
 #  Module-level logger — silent by default (failures never propagate)
 # ------------------------------------------------------------------ #
-_log = logging.getLogger(__name__)
-_log.addHandler(logging.NullHandler())
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 # ------------------------------------------------------------------ #
 #  Configurable constants
 # ------------------------------------------------------------------ #
-MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024   # 100 MB
-MAX_ROTATED_FILES   = 20                  # keep newest 20 .gz
+MAX_FILE_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
+MAX_ROTATED_FILES = 20  # keep newest 20 .gz
 
 # Persistent schema-history file so comparisons survive Python restarts.
 SCHEMA_HISTORY_PATH = (
@@ -72,34 +72,30 @@ _BLOCKING_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
 # ------------------------------------------------------------------ #
 CREDENTIAL_PATTERNS: list[tuple[str, str]] = [
     # Bearer / Authorization headers
-    (r'(?i)authorization\s*:\s*Bearer\s+[^\r\n]+',
-     "Authorization: Bearer [REDACTED]"),
-    (r'(?i)authorization\s*:\s*Basic\s+[^\r\n]+',
-     "Authorization: Basic [REDACTED]"),
-    (r'(?i)authorization\s*:\s*[^\r\n]+',
-     "Authorization: [REDACTED]"),
+    (r"(?i)authorization\s*:\s*Bearer\s+[^\r\n]+", "Authorization: Bearer [REDACTED]"),
+    (r"(?i)authorization\s*:\s*Basic\s+[^\r\n]+", "Authorization: Basic [REDACTED]"),
+    (r"(?i)authorization\s*:\s*[^\r\n]+", "Authorization: [REDACTED]"),
     # API keys in key=value form
-    (r'(?i)(api[_-]?key|apikey|secret[_-]?key|token)\s*[=:]\s*[^\s\r\n,;]+',
-     r'\1=[REDACTED]'),
+    (
+        r"(?i)(api[_-]?key|apikey|secret[_-]?key|token)\s*[=:]\s*[^\s\r\n,;]+",
+        r"\1=[REDACTED]",
+    ),
     # Cookie headers
-    (r'(?i)cookie\s*:\s*[^\r\n]+', "Cookie: [REDACTED]"),
+    (r"(?i)cookie\s*:\s*[^\r\n]+", "Cookie: [REDACTED]"),
     # OAuth tokens
-    (r'(?i)oauth[_-]?token\s*[=:]\s*[^\s\r\n,;]+',
-     r'oauth_token=[REDACTED]'),
+    (r"(?i)oauth[_-]?token\s*[=:]\s*[^\s\r\n,;]+", r"oauth_token=[REDACTED]"),
     # Generic "token": "..." JSON patterns
-    (r'(?i)"token"\s*:\s*"[^"]+"',
-     '"token": "[REDACTED]"'),
+    (r'(?i)"token"\s*:\s*"[^"]+"', '"token": "[REDACTED]"'),
     # "access_token" JSON
-    (r'(?i)"access[_-]?token"\s*:\s*"[^"]+"',
-     '"access_token": "[REDACTED]"'),
+    (r'(?i)"access[_-]?token"\s*:\s*"[^"]+"', '"access_token": "[REDACTED]"'),
     # "refresh_token" JSON
-    (r'(?i)"refresh[_-]?token"\s*:\s*"[^"]+"',
-     '"refresh_token": "[REDACTED]"'),
+    (r'(?i)"refresh[_-]?token"\s*:\s*"[^"]+"', '"refresh_token": "[REDACTED]"'),
 ]
 
 # ─────────────────────────────────────────────────────────────────── #
 #  Schema persistence helpers
 # ─────────────────────────────────────────────────────────────────── #
+
 
 def _load_persistent_schema_history() -> dict[str, Any]:
     """Load recorded schemas from disk (cross-session history)."""
@@ -109,7 +105,9 @@ def _load_persistent_schema_history() -> dict[str, Any]:
         with open(SCHEMA_HISTORY_PATH, "r", encoding="utf-8") as fh:
             return json.load(fh)
     except Exception:
-        _log.warning("Could not load schema history — starting fresh", exc_info=True)
+        logger.exception(
+            "Could not load schema history — starting fresh", exc_info=False
+        )
         return {}
 
 
@@ -122,16 +120,19 @@ def _save_persistent_schema_history(data: dict[str, Any]) -> None:
             json.dump(data, fh, indent=2, default=str, ensure_ascii=False)
         tmp.replace(SCHEMA_HISTORY_PATH)
     except Exception:
-        _log.warning("Could not persist schema history", exc_info=True)
+        logger.exception("Could not persist schema history", exc_info=False)
         try:
             tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as error:
+            logging.getLogger(__name__).exception(
+                "Handled failure type=%s", type(error).__name__, exc_info=False
+            )
 
 
 # ─────────────────────────────────────────────────────────────────── #
 #  File rotation (run in executor to avoid blocking the event loop)
 # ─────────────────────────────────────────────────────────────────── #
+
 
 def _rotate_file_if_needed(file_path: Path) -> None:
     """Check file size; if >= MAX_FILE_SIZE_BYTES, rotate and gzip."""
@@ -141,13 +142,15 @@ def _rotate_file_if_needed(file_path: Path) -> None:
     if size < MAX_FILE_SIZE_BYTES:
         return
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     gz_name = f"{file_path.stem}.{timestamp}.jsonl.gz"
     gz_path = file_path.parent / gz_name
 
-    with open(file_path, "rb") as f_in:
-        with gzip_module.open(gz_path, "wb", compresslevel=6) as f_out:
-            shutil.copyfileobj(f_in, f_out)
+    with (
+        open(file_path, "rb") as f_in,
+        gzip_module.open(gz_path, "wb", compresslevel=6) as f_out,
+    ):
+        shutil.copyfileobj(f_in, f_out)
 
     # Truncate the live file atomically
     file_path.unlink()
@@ -178,6 +181,7 @@ def _prune_old_rotated(log_dir: Path, stem: str) -> None:
 #  Redaction
 # ------------------------------------------------------------------ #
 
+
 def _redact_credentials(text: str) -> str:
     """Strip API keys, tokens, and auth headers from raw text."""
     for pattern, replacement in CREDENTIAL_PATTERNS:
@@ -188,6 +192,7 @@ def _redact_credentials(text: str) -> str:
 # ------------------------------------------------------------------ #
 #  Response type detection (lightweight, only inspects what's needed)
 # ------------------------------------------------------------------ #
+
 
 def _detect_response_type(raw: str | None) -> str:
     """Classify the raw stdout without copying the full string."""
@@ -239,19 +244,20 @@ def _detect_response_type(raw: str | None) -> str:
 #  Content‑type inference
 # ------------------------------------------------------------------ #
 
+
 def _infer_content_type(raw: str | None) -> str:
     """Heuristic content-type inference from raw text."""
     rtype = _detect_response_type(raw)
     mapping = {
-        "null":         "null",
-        "empty":        "text/plain (empty)",
-        "whitespace":   "text/plain (whitespace)",
-        "json object":  "application/json",
-        "json array":   "application/json",
-        "html":         "text/html",
-        "plain text":   "text/plain",
-        "markdown":     "text/markdown",
-        "binary":       "application/octet-stream",
+        "null": "null",
+        "empty": "text/plain (empty)",
+        "whitespace": "text/plain (whitespace)",
+        "json object": "application/json",
+        "json array": "application/json",
+        "html": "text/html",
+        "plain text": "text/plain",
+        "markdown": "text/markdown",
+        "binary": "application/octet-stream",
     }
     return mapping.get(rtype, "unknown")
 
@@ -260,6 +266,7 @@ def _infer_content_type(raw: str | None) -> str:
 #  HTML metadata extraction (title, status, body length, samples)
 # ------------------------------------------------------------------ #
 
+
 def _extract_html_metadata(raw: str | None) -> dict[str, Any] | None:
     """Extract lightweight HTML diagnostics without full parsing."""
     if not raw or _detect_response_type(raw) != "html":
@@ -267,8 +274,8 @@ def _extract_html_metadata(raw: str | None) -> dict[str, Any] | None:
 
     meta: dict[str, Any] = {
         "body_length_chars": len(raw),
-        "first_1000_chars":  raw[:1000],
-        "last_1000_chars":   raw[-1000:] if len(raw) > 1000 else None,
+        "first_1000_chars": raw[:1000],
+        "last_1000_chars": raw[-1000:] if len(raw) > 1000 else None,
     }
 
     # Title
@@ -277,9 +284,7 @@ def _extract_html_metadata(raw: str | None) -> dict[str, Any] | None:
         meta["title"] = title_m.group(1).strip()
 
     # HTTP status embedded in HTML, e.g. "HTTP/1.1 429" or "Status: 503"
-    status_m = re.search(
-        r'(?:HTTP/\d\.\d\s+|Status\s*:\s*)(\d{3})', raw, re.IGNORECASE
-    )
+    status_m = re.search(r"(?:HTTP/\d\.\d\s+|Status\s*:\s*)(\d{3})", raw, re.IGNORECASE)
     if status_m:
         meta["status_code_candidate"] = int(status_m.group(1))
 
@@ -289,6 +294,7 @@ def _extract_html_metadata(raw: str | None) -> dict[str, Any] | None:
 # ------------------------------------------------------------------ #
 #  Schema discovery (recursive)
 # ------------------------------------------------------------------ #
+
 
 def _discover_schema(obj: Any, depth: int = 0, max_depth: int = 20) -> dict[str, Any]:
     """Recursively inspect a JSON value and record structure metadata."""
@@ -312,13 +318,18 @@ def _discover_schema(obj: Any, depth: int = 0, max_depth: int = 20) -> dict[str,
             field_info["_field_type"] = type(value).__name__
             # Record sample value (non‑recursive leaf representation)
             if isinstance(value, (str, int, float, bool)) or value is None:
-                field_info["_sample_value"] = repr(value) if isinstance(value, str) else value
+                field_info["_sample_value"] = (
+                    repr(value) if isinstance(value, str) else value
+                )
             keys_info.append(field_info)
         result["_fields"] = keys_info
-        result["_object_depth"] = max(
-            (f.get("_object_depth", 0) for f in keys_info if f.get("_is_object")),
-            default=0,
-        ) + 1
+        result["_object_depth"] = (
+            max(
+                (f.get("_object_depth", 0) for f in keys_info if f.get("_is_object")),
+                default=0,
+            )
+            + 1
+        )
         result["_array_depth"] = max(
             (f.get("_array_depth", 0) for f in keys_info if f.get("_is_array")),
             default=0,
@@ -351,6 +362,7 @@ def _discover_schema(obj: Any, depth: int = 0, max_depth: int = 20) -> dict[str,
 # ------------------------------------------------------------------ #
 #  Schema diff (comprehensive: field adds/removes/renames, type, null, etc.)
 # ------------------------------------------------------------------ #
+
 
 def _compute_schema_diff(
     current_schema: dict[str, Any],
@@ -388,22 +400,26 @@ def _compute_schema_diff(
         ct = cf.get("_type", cf.get("_field_type"))
         pt = pf.get("_type", pf.get("_field_type"))
         if ct != pt:
-            changed_types.append({
-                "field": key,
-                "previous_type": pt,
-                "current_type": ct,
-            })
+            changed_types.append(
+                {
+                    "field": key,
+                    "previous_type": pt,
+                    "current_type": ct,
+                }
+            )
         # Nullability: was it null before and not now, or vice versa?
         cv = cf.get("_sample_value")
         pv = pf.get("_sample_value")
-        was_null = (pv is None or pv == "None")
-        is_null = (cv is None or cv == "None")
+        was_null = pv is None or pv == "None"
+        is_null = cv is None or cv == "None"
         if was_null != is_null:
-            changed_nullability.append({
-                "field": key,
-                "was_null": was_null,
-                "is_now_null": is_null,
-            })
+            changed_nullability.append(
+                {
+                    "field": key,
+                    "was_null": was_null,
+                    "is_now_null": is_null,
+                }
+            )
 
     if changed_types:
         diff["changed_types"] = changed_types
@@ -415,30 +431,36 @@ def _compute_schema_diff(
     prev_obj_depth = previous_schema.get("_object_depth", 0)
     curr_obj_depth = current_schema.get("_object_depth", 0)
     if prev_obj_depth != curr_obj_depth:
-        structural.append({
-            "aspect": "object_depth",
-            "previous": prev_obj_depth,
-            "current": curr_obj_depth,
-        })
+        structural.append(
+            {
+                "aspect": "object_depth",
+                "previous": prev_obj_depth,
+                "current": curr_obj_depth,
+            }
+        )
 
     prev_arr_depth = previous_schema.get("_array_depth", 0)
     curr_arr_depth = current_schema.get("_array_depth", 0)
     if prev_arr_depth != curr_arr_depth:
-        structural.append({
-            "aspect": "array_depth",
-            "previous": prev_arr_depth,
-            "current": curr_arr_depth,
-        })
+        structural.append(
+            {
+                "aspect": "array_depth",
+                "previous": prev_arr_depth,
+                "current": curr_arr_depth,
+            }
+        )
 
     # Key count changed
     prev_kc = previous_schema.get("_key_count", 0)
     curr_kc = current_schema.get("_key_count", 0)
     if prev_kc != curr_kc:
-        structural.append({
-            "aspect": "key_count",
-            "previous": prev_kc,
-            "current": curr_kc,
-        })
+        structural.append(
+            {
+                "aspect": "key_count",
+                "previous": prev_kc,
+                "current": curr_kc,
+            }
+        )
 
     if structural:
         diff["structural_changes"] = structural
@@ -451,16 +473,18 @@ def _compute_schema_diff(
         c_len = cf.get("_length")
         p_len = pf.get("_length")
         if c_len is not None and p_len is not None:
-            was_empty = (p_len == 0)
-            is_empty = (c_len == 0)
+            was_empty = p_len == 0
+            is_empty = c_len == 0
             if was_empty != is_empty:
-                array_changes.append({
-                    "field": key,
-                    "was_empty_array": was_empty,
-                    "is_now_empty_array": is_empty,
-                    "previous_length": p_len,
-                    "current_length": c_len,
-                })
+                array_changes.append(
+                    {
+                        "field": key,
+                        "was_empty_array": was_empty,
+                        "is_now_empty_array": is_empty,
+                        "previous_length": p_len,
+                        "current_length": c_len,
+                    }
+                )
     if array_changes:
         diff["array_emptiness_changes"] = array_changes
 
@@ -474,11 +498,17 @@ def _compute_schema_diff(
         cf_is_obj = cf.get("_is_object", False)
         pf_is_obj = pf.get("_is_object", False)
         if (cf_is_arr and pf_is_obj) or (cf_is_obj and pf_is_arr):
-            obj_arr_swap.append({
-                "field": key,
-                "was": "array" if pf_is_arr else ("object" if pf_is_obj else pf.get("_type")),
-                "now": "array" if cf_is_arr else ("object" if cf_is_obj else cf.get("_type")),
-            })
+            obj_arr_swap.append(
+                {
+                    "field": key,
+                    "was": "array"
+                    if pf_is_arr
+                    else ("object" if pf_is_obj else pf.get("_type")),
+                    "now": "array"
+                    if cf_is_arr
+                    else ("object" if cf_is_obj else cf.get("_type")),
+                }
+            )
     if obj_arr_swap:
         diff["object_array_swaps"] = obj_arr_swap
 
@@ -495,7 +525,7 @@ _persistent_schema_loaded = False
 
 def _ensure_persistent_loaded() -> None:
     """One‑shot populate in‑memory history from disk."""
-    global _persistent_schema_loaded, _schema_history
+    global _persistent_schema_loaded
     if _persistent_schema_loaded:
         return
     _persistent_schema_loaded = True
@@ -517,13 +547,15 @@ async def _store_schema(tool_name: str, schema: dict[str, Any]) -> None:
     async with _schema_history_lock:
         existing = _schema_history.get(tool_name, {})
         schema["call_count"] = existing.get("call_count", 0) + 1
-        schema["last_seen_utc"] = datetime.now(timezone.utc).isoformat()
+        schema["last_seen_utc"] = datetime.now(UTC).isoformat()
         _schema_history[tool_name] = schema
 
     # Persist asynchronously (fire‑and‑forget, failure is silent)
     loop = asyncio.get_running_loop()
     data_snapshot = dict(_schema_history)
-    loop.run_in_executor(_BLOCKING_EXECUTOR, _save_persistent_schema_history, data_snapshot)
+    loop.run_in_executor(
+        _BLOCKING_EXECUTOR, _save_persistent_schema_history, data_snapshot
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -553,6 +585,7 @@ def _extract_tool_name(prompt: str) -> str:
 #  Recursive numeric anomaly detection (full JSON path)
 # ------------------------------------------------------------------ #
 
+
 def _detect_numeric_anomalies(
     obj: Any,
     path: str = "$",
@@ -567,53 +600,65 @@ def _detect_numeric_anomalies(
         for key, value in obj.items():
             full_path = f"{path}.{key}"
             if value == 0 or value == 0.0:
-                anomalies.append({
-                    "json_path": full_path,
-                    "field": key,
-                    "actual_type": type(value).__name__,
-                    "actual_value": value,
-                    "issue": "zero_numeric",
-                })
+                anomalies.append(
+                    {
+                        "json_path": full_path,
+                        "field": key,
+                        "actual_type": type(value).__name__,
+                        "actual_value": value,
+                        "issue": "zero_numeric",
+                    }
+                )
             elif value == "0":
-                anomalies.append({
-                    "json_path": full_path,
-                    "field": key,
-                    "actual_type": "str",
-                    "actual_value": '"0"',
-                    "issue": "zero_string",
-                })
+                anomalies.append(
+                    {
+                        "json_path": full_path,
+                        "field": key,
+                        "actual_type": "str",
+                        "actual_value": '"0"',
+                        "issue": "zero_string",
+                    }
+                )
             elif value == "0.0":
-                anomalies.append({
-                    "json_path": full_path,
-                    "field": key,
-                    "actual_type": "str",
-                    "actual_value": '"0.0"',
-                    "issue": "zero_float_string",
-                })
+                anomalies.append(
+                    {
+                        "json_path": full_path,
+                        "field": key,
+                        "actual_type": "str",
+                        "actual_value": '"0.0"',
+                        "issue": "zero_float_string",
+                    }
+                )
             elif value is None:
-                anomalies.append({
-                    "json_path": full_path,
-                    "field": key,
-                    "actual_type": "NoneType",
-                    "actual_value": None,
-                    "issue": "null",
-                })
+                anomalies.append(
+                    {
+                        "json_path": full_path,
+                        "field": key,
+                        "actual_type": "NoneType",
+                        "actual_value": None,
+                        "issue": "null",
+                    }
+                )
             elif value == "":
-                anomalies.append({
-                    "json_path": full_path,
-                    "field": key,
-                    "actual_type": "str",
-                    "actual_value": '""',
-                    "issue": "empty_string",
-                })
+                anomalies.append(
+                    {
+                        "json_path": full_path,
+                        "field": key,
+                        "actual_type": "str",
+                        "actual_value": '""',
+                        "issue": "empty_string",
+                    }
+                )
             elif value is False:
-                anomalies.append({
-                    "json_path": full_path,
-                    "field": key,
-                    "actual_type": "bool",
-                    "actual_value": False,
-                    "issue": "false_bool",
-                })
+                anomalies.append(
+                    {
+                        "json_path": full_path,
+                        "field": key,
+                        "actual_type": "bool",
+                        "actual_value": False,
+                        "issue": "false_bool",
+                    }
+                )
             elif isinstance(value, (dict, list)):
                 anomalies.extend(
                     _detect_numeric_anomalies(value, full_path, max_depth - 1)
@@ -630,13 +675,15 @@ def _detect_numeric_anomalies(
                     _detect_numeric_anomalies(item, full_path, max_depth - 1)
                 )
             elif item == 0 or item == 0.0:
-                anomalies.append({
-                    "json_path": full_path,
-                    "field": f"[{idx}]",
-                    "actual_type": type(item).__name__,
-                    "actual_value": item,
-                    "issue": "zero_numeric_in_array",
-                })
+                anomalies.append(
+                    {
+                        "json_path": full_path,
+                        "field": f"[{idx}]",
+                        "actual_type": type(item).__name__,
+                        "actual_value": item,
+                        "issue": "zero_numeric_in_array",
+                    }
+                )
 
     return anomalies
 
@@ -646,7 +693,8 @@ def _detect_numeric_anomalies(
 # ------------------------------------------------------------------ #
 
 _FENCE_START_RE = re.compile(r"^\s*```(?:\s*(\w+))?\s*$", re.MULTILINE)
-_FENCE_END_RE   = re.compile(r"^\s*```\s*$", re.MULTILINE)
+_FENCE_END_RE = re.compile(r"^\s*```\s*$", re.MULTILINE)
+
 
 def _detect_markdown_fences(raw: str) -> dict[str, Any]:
     """
@@ -676,12 +724,12 @@ def _detect_markdown_fences(raw: str) -> dict[str, Any]:
     # Count fence blocks
     openings = _FENCE_START_RE.findall(raw)
     closings = _FENCE_END_RE.findall(raw)
-    n_open  = len(openings)
+    n_open = len(openings)
     n_close = len(_FENCE_END_RE.findall(raw)) if closings else 0
 
     result["number_of_fence_blocks"] = n_open
-    result["has_partial_fence"] = (n_open != n_close)
-    result["has_double_fencing"] = (n_open >= 2)
+    result["has_partial_fence"] = n_open != n_close
+    result["has_double_fencing"] = n_open >= 2
 
     if openings:
         result["fence_language"] = openings[0] or "plain"
@@ -700,6 +748,7 @@ def _detect_markdown_fences(raw: str) -> dict[str, Any]:
 # ------------------------------------------------------------------ #
 #  Partially‑balanced JSON extraction (fallback for truncated output)
 # ------------------------------------------------------------------ #
+
 
 def _fallback_trim_json(raw: str) -> dict[str, Any]:
     """
@@ -725,7 +774,7 @@ def _fallback_trim_json(raw: str) -> dict[str, Any]:
     if last_brace == -1:
         return result
 
-    trimmed = stripped[:last_brace + 1]
+    trimmed = stripped[: last_brace + 1]
     if not trimmed:
         return result
 
@@ -744,6 +793,7 @@ def _fallback_trim_json(raw: str) -> dict[str, Any]:
 # ------------------------------------------------------------------ #
 #  Partial JSON detection (truncated, extra chars, multiple docs, etc.)
 # ------------------------------------------------------------------ #
+
 
 def _detect_json_anomalies(raw: str) -> dict[str, Any]:
     """Detect structural anomalies in what looks like JSON text."""
@@ -777,9 +827,11 @@ def _detect_json_anomalies(raw: str) -> dict[str, Any]:
         # Check if JSON starts later
         brace_pos = working.find("{")
         bracket_pos = working.find("[")
-        first_json = min(
-            p for p in (brace_pos, bracket_pos) if p >= 0
-        ) if (brace_pos >= 0 or bracket_pos >= 0) else -1
+        first_json = (
+            min(p for p in (brace_pos, bracket_pos) if p >= 0)
+            if (brace_pos >= 0 or bracket_pos >= 0)
+            else -1
+        )
         if first_json > 0:
             result["leading_garbage_before_json"] = True
 
@@ -787,13 +839,8 @@ def _detect_json_anomalies(raw: str) -> dict[str, Any]:
     if working:
         opens = working.count("{") + working.count("[")
         closes = working.count("}") + working.count("]")
-        if opens != closes:
-            # One extra is expected for top‑level object (1 open brace at start)
-            # But arrays or nested objects can throw this off
-            if abs(opens - closes) > 2:
-                result["detected_truncated_json"] = True
-            elif opens > closes:
-                result["detected_truncated_json"] = True
+        if opens != closes and (abs(opens - closes) > 2 or opens > closes):
+            result["detected_truncated_json"] = True
 
     # Multiple JSON docs: find second { or [ after first complete object
     json_count = 0
@@ -801,7 +848,7 @@ def _detect_json_anomalies(raw: str) -> dict[str, Any]:
     decoder = json.JSONDecoder()
     while pos < len(working):
         try:
-            obj, end = decoder.raw_decode(working[pos:])
+            _obj, end = decoder.raw_decode(working[pos:])
             json_count += 1
             pos += end
             # Skip whitespace between docs
@@ -825,9 +872,14 @@ def _detect_json_anomalies(raw: str) -> dict[str, Any]:
     # JSON followed by text: first complete JSON parse succeeds, then text follows
     if working and working[0] in ("{", "["):
         try:
-            obj, end = json.JSONDecoder().raw_decode(working)
+            _obj, end = json.JSONDecoder().raw_decode(working)
             remaining = working[end:].strip()
-            if remaining and len(remaining) > 3 and not remaining.startswith("{") and not remaining.startswith("["):
+            if (
+                remaining
+                and len(remaining) > 3
+                and not remaining.startswith("{")
+                and not remaining.startswith("[")
+            ):
                 result["json_followed_by_text"] = True
         except json.JSONDecodeError:
             pass
@@ -838,6 +890,7 @@ def _detect_json_anomalies(raw: str) -> dict[str, Any]:
 # ------------------------------------------------------------------ #
 #  Empty‑response differentiation
 # ------------------------------------------------------------------ #
+
 
 def _classify_empty_response(
     stdout_raw: str | None,
@@ -854,29 +907,30 @@ def _classify_empty_response(
     collapsed flag.
     """
     return {
-        "stdout_is_none":           stdout_raw is None,
-        "stdout_is_empty_string":   stdout_raw == "",
-        "stdout_is_zero_byte":      stdout_bytes == 0,
-        "stdout_is_whitespace_only":bool(stdout_raw and stdout_raw.isspace()),
-        "stdout_is_newline_only":   bool(stdout_raw and stdout_raw.strip() == ""),
-        "stdout_exists":            stdout_bytes > 0,
-        "stderr_exists":            stderr_bytes > 0,
-        "stderr_is_none":           stderr_raw is None,
-        "stderr_is_empty_string":   stderr_raw == "",
-        "stderr_is_zero_byte":      stderr_bytes == 0,
-        "only_stdout_present":      stdout_bytes > 0 and stderr_bytes == 0,
-        "only_stderr_present":      stdout_bytes == 0 and stderr_bytes > 0,
-        "both_present":             stdout_bytes > 0 and stderr_bytes > 0,
-        "neither_present":          stdout_bytes == 0 and stderr_bytes == 0,
-        "process_never_started":    not process_was_launched,
-        "process_pid":              pid,
-        "process_returncode":       returncode,
+        "stdout_is_none": stdout_raw is None,
+        "stdout_is_empty_string": stdout_raw == "",
+        "stdout_is_zero_byte": stdout_bytes == 0,
+        "stdout_is_whitespace_only": bool(stdout_raw and stdout_raw.isspace()),
+        "stdout_is_newline_only": bool(stdout_raw and stdout_raw.strip() == ""),
+        "stdout_exists": stdout_bytes > 0,
+        "stderr_exists": stderr_bytes > 0,
+        "stderr_is_none": stderr_raw is None,
+        "stderr_is_empty_string": stderr_raw == "",
+        "stderr_is_zero_byte": stderr_bytes == 0,
+        "only_stdout_present": stdout_bytes > 0 and stderr_bytes == 0,
+        "only_stderr_present": stdout_bytes == 0 and stderr_bytes > 0,
+        "both_present": stdout_bytes > 0 and stderr_bytes > 0,
+        "neither_present": stdout_bytes == 0 and stderr_bytes == 0,
+        "process_never_started": not process_was_launched,
+        "process_pid": pid,
+        "process_returncode": returncode,
     }
 
 
 # ------------------------------------------------------------------ #
 #  Record builder
 # ------------------------------------------------------------------ #
+
 
 def _build_record(
     *,
@@ -900,12 +954,16 @@ def _build_record(
     analysis stages independently. Raw stdout/stderr are NEVER
     overwritten — cleaned versions are stored in separate fields.
     """
-    now_utc = datetime.now(timezone.utc).isoformat()
+    now_utc = datetime.now(UTC).isoformat()
     request_id = str(uuid.uuid4())
 
     # ── Byte‑level lengths (important: BEFORE any transformation) ─
-    stdout_bytes = len(stdout_raw.encode("utf-8", errors="replace")) if stdout_raw else 0
-    stderr_bytes = len(stderr_raw.encode("utf-8", errors="replace")) if stderr_raw else 0
+    stdout_bytes = (
+        len(stdout_raw.encode("utf-8", errors="replace")) if stdout_raw else 0
+    )
+    stderr_bytes = (
+        len(stderr_raw.encode("utf-8", errors="replace")) if stderr_raw else 0
+    )
     stdout_chars = len(stdout_raw) if stdout_raw else 0
     stderr_chars = len(stderr_raw) if stderr_raw else 0
 
@@ -921,19 +979,24 @@ def _build_record(
     html_metadata = _extract_html_metadata(stdout_raw)
 
     # ── Empty‑response granular classification ────────────────────────
-    process_was_launched = (pid is not None)
+    process_was_launched = pid is not None
     empty_classification = _classify_empty_response(
-        stdout_raw, stderr_raw, stdout_bytes, stderr_bytes,
-        pid, returncode, process_was_launched,
+        stdout_raw,
+        stderr_raw,
+        stdout_bytes,
+        stderr_bytes,
+        pid,
+        returncode,
+        process_was_launched,
     )
 
     # ── Markdown fence detection (multi‑stage) ────────────────────────
     fence_info = _detect_markdown_fences(stdout_raw if stdout_raw else "")
-    had_markdown_fence      = fence_info["had_markdown_fence"]
-    fence_language          = fence_info["fence_language"]
-    number_of_fence_blocks  = fence_info["number_of_fence_blocks"]
-    has_double_fencing      = fence_info["has_double_fencing"]
-    has_partial_fence       = fence_info["has_partial_fence"]
+    had_markdown_fence = fence_info["had_markdown_fence"]
+    fence_language = fence_info["fence_language"]
+    number_of_fence_blocks = fence_info["number_of_fence_blocks"]
+    has_double_fencing = fence_info["has_double_fencing"]
+    has_partial_fence = fence_info["has_partial_fence"]
     stdout_after_fence_strip = fence_info.get("stdout_after_fence_strip")
 
     # ── JSON anomaly detection (truncation, multiple docs, garbage) ──
@@ -944,8 +1007,10 @@ def _build_record(
     json_parse_input_used: str | None = None
     json_parse_input_description: str = "none"
 
-    parse_candidate = stdout_after_fence_strip if had_markdown_fence else (
-        stdout_raw.strip() if stdout_raw else ""
+    parse_candidate = (
+        stdout_after_fence_strip
+        if had_markdown_fence
+        else (stdout_raw.strip() if stdout_raw else "")
     )
 
     json_exception: str | None = None
@@ -956,10 +1021,14 @@ def _build_record(
     missing_fields: list[str] | None = None
     json_parse_attempted = False
     json_parse_succeeded = False
-    json_parse_failed    = False
+    json_parse_failed = False
 
     # SKIP JSON parsing entirely for HTML responses
-    if response_type != "html" and response_type not in ("null", "binary") and parse_candidate:
+    if (
+        response_type != "html"
+        and response_type not in ("null", "binary")
+        and parse_candidate
+    ):
         json_parse_attempted = True
         json_parse_input_used = parse_candidate
         json_parse_input_description = (
@@ -1000,9 +1069,9 @@ def _build_record(
 
     # ── Fallback trimming (brace‑balanced) ────────────────────────────
     fallback = _fallback_trim_json(stdout_raw if stdout_raw else "")
-    fallback_trim_attempted  = fallback["attempted"]
-    fallback_trim_succeeded  = fallback["succeeded"]
-    fallback_trimmed_object  = fallback["parsed_object"]
+    fallback_trim_attempted = fallback["attempted"]
+    fallback_trim_succeeded = fallback["succeeded"]
+    fallback_trimmed_object = fallback["parsed_object"]
     stdout_after_fallback_trim = fallback.get("stdout_after_fallback_trim")
 
     # ── Response truncated flag (heuristic) ────────────────────────────
@@ -1021,7 +1090,7 @@ def _build_record(
         try:
             schema = _discover_schema(obj_for_schema)
         except Exception:
-            _log.warning("Schema discovery failed", exc_info=True)
+            logger.exception("Schema discovery failed", exc_info=False)
 
     # ── Validation simulation ─────────────────────────────────────────
     validation_attempted = False
@@ -1035,14 +1104,12 @@ def _build_record(
         numeric_anomalies = _detect_numeric_anomalies(parsed_object)
 
     # ── Is the response empty? (summary boolean for quick querying) ──
-    is_empty = (stdout_raw is None or stdout_raw == "" or stdout_raw.isspace())
+    is_empty = stdout_raw is None or stdout_raw == "" or stdout_raw.isspace()
 
     # ── Unexpected fields (present in JSON but not in expected list) ─
     unexpected_fields: list[str] | None = None
     if expected_fields and isinstance(parsed_object, dict):
-        unexpected_fields = sorted(
-            set(parsed_object.keys()) - set(expected_fields)
-        )
+        unexpected_fields = sorted(set(parsed_object.keys()) - set(expected_fields))
         if not unexpected_fields:
             unexpected_fields = None
 
@@ -1051,84 +1118,71 @@ def _build_record(
     # ═══════════════════════════════════════════════════════════════ #
     record: dict[str, Any] = {
         # ── Metadata ──────────────────────────────────────────────
-        "request_id":      request_id,
-        "timestamp_utc":   now_utc,
-        "tool_name":       tool_name,
+        "request_id": request_id,
+        "timestamp_utc": now_utc,
+        "tool_name": tool_name,
         "original_prompt": prompt,
-        "duration_ms":     duration_ms,
-        "attempt":         attempt,
+        "duration_ms": duration_ms,
+        "attempt": attempt,
         "claude_executable": claude_executable,
-        "pid":             pid,
-        "returncode":      returncode,
-
+        "pid": pid,
+        "returncode": returncode,
         # ── Raw output (redacted but BYTE-FOR-BYTE otherwise) ──────
-        "raw_stdout":             stdout_redacted,
-        "raw_stderr":             stderr_redacted,
-        "stdout_length_chars":    stdout_chars,
-        "stdout_length_bytes":    stdout_bytes,
-        "stderr_length_chars":    stderr_chars,
-        "stderr_length_bytes":    stderr_bytes,
-
+        "raw_stdout": stdout_redacted,
+        "raw_stderr": stderr_redacted,
+        "stdout_length_chars": stdout_chars,
+        "stdout_length_bytes": stdout_bytes,
+        "stderr_length_chars": stderr_chars,
+        "stderr_length_bytes": stderr_bytes,
         # ── Markdown fence handling (multi‑stage) ──────────────────
-        "had_markdown_fence":      had_markdown_fence,
-        "fence_language":          fence_language,
-        "number_of_fence_blocks":  number_of_fence_blocks,
-        "has_double_fencing":      has_double_fencing,
-        "has_partial_fence":       has_partial_fence,
+        "had_markdown_fence": had_markdown_fence,
+        "fence_language": fence_language,
+        "number_of_fence_blocks": number_of_fence_blocks,
+        "has_double_fencing": has_double_fencing,
+        "has_partial_fence": has_partial_fence,
         "stdout_after_fence_strip": stdout_after_fence_strip,
-
         # ── Response type detection ────────────────────────────────
-        "response_type":          response_type,
+        "response_type": response_type,
         "content_type_inference": content_type_inference,
-        "is_empty_summary":       is_empty,
-        "is_html":                response_type == "html",
-        "html_metadata":          html_metadata,
-
+        "is_empty_summary": is_empty,
+        "is_html": response_type == "html",
+        "html_metadata": html_metadata,
         # ── Empty‑response granular classification ─────────────────
-        "empty_classification":   empty_classification,
-
+        "empty_classification": empty_classification,
         # ── JSON anomaly detection ─────────────────────────────────
-        "json_anomalies":         json_anomalies,
-
+        "json_anomalies": json_anomalies,
         # ── JSON parsing (stage‑by‑stage) ──────────────────────────
-        "json_parse_attempted":   json_parse_attempted,
-        "json_parse_input":       json_parse_input_used,
+        "json_parse_attempted": json_parse_attempted,
+        "json_parse_input": json_parse_input_used,
         "json_parse_input_description": json_parse_input_description,
-        "json_parse_succeeded":   json_parse_succeeded,
-        "json_parse_failed":      json_parse_failed,
-        "json_parse_output":      parsed_object,
-        "json_exception":         json_exception,
-        "json_traceback":         full_traceback,
-        "top_level_json_type":    top_level_json_type,
-        "top_level_keys":         top_level_keys,
-        "missing_fields":         missing_fields,
-        "unexpected_fields":      unexpected_fields,
-
+        "json_parse_succeeded": json_parse_succeeded,
+        "json_parse_failed": json_parse_failed,
+        "json_parse_output": parsed_object,
+        "json_exception": json_exception,
+        "json_traceback": full_traceback,
+        "top_level_json_type": top_level_json_type,
+        "top_level_keys": top_level_keys,
+        "missing_fields": missing_fields,
+        "unexpected_fields": unexpected_fields,
         # ── Fallback trimming ──────────────────────────────────────
-        "fallback_trim_attempted":   fallback_trim_attempted,
-        "fallback_trim_succeeded":   fallback_trim_succeeded,
+        "fallback_trim_attempted": fallback_trim_attempted,
+        "fallback_trim_succeeded": fallback_trim_succeeded,
         "stdout_after_fallback_trim": stdout_after_fallback_trim,
-        "fallback_trimmed_output":    fallback_trimmed_object,
-
+        "fallback_trimmed_output": fallback_trimmed_object,
         # ── Truncation ─────────────────────────────────────────────
-        "response_truncated":     response_truncated,
-
+        "response_truncated": response_truncated,
         # ── Schema discovery ───────────────────────────────────────
-        "schema":                 schema,
-
+        "schema": schema,
         # ── Validation ─────────────────────────────────────────────
-        "validation_attempted":   validation_attempted,
-        "validation_result":      validation_result,
-        "validation_errors":      validation_errors,
-
+        "validation_attempted": validation_attempted,
+        "validation_result": validation_result,
+        "validation_errors": validation_errors,
         # ── Final parsed object (if successful) ────────────────────
-        "final_parsed_object":    parsed_object,
-
+        "final_parsed_object": parsed_object,
         # ── Numeric anomalies (recursive) ──────────────────────────
-        "numeric_anomalies":      numeric_anomalies,
-
+        "numeric_anomalies": numeric_anomalies,
         # ── Exception recording (from _call_with_retry) ────────────
-        "exception":              exception_info,
+        "exception": exception_info,
     }
 
     return record
@@ -1144,6 +1198,11 @@ _write_lock = asyncio.Lock()
 DEFAULT_LOG_PATH: Path = (
     Path(__file__).resolve().parent.parent / "logs" / "mcp_response_trace.jsonl"
 )
+
+
+def _append_record_line(path: Path, line: str) -> None:
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(line)
 
 
 async def write_record(
@@ -1168,15 +1227,15 @@ async def write_record(
             await _rotate_async(path)
             # Write one JSON line
             line = json.dumps(record, default=str, ensure_ascii=False) + "\n"
-            with open(path, "a", encoding="utf-8") as fh:
-                fh.write(line)
+            await asyncio.to_thread(_append_record_line, path, line)
     except Exception:
-        _log.warning("write_record failed — trading continues", exc_info=True)
+        logger.exception("write_record failed — trading continues", exc_info=False)
 
 
 # ------------------------------------------------------------------ #
 #  Main capture entry‑point (called from robinhood_client.py)
 # ------------------------------------------------------------------ #
+
 
 async def capture_mcp_call(
     *,
@@ -1238,13 +1297,14 @@ async def capture_mcp_call(
         return record.get("request_id", "")
 
     except Exception:
-        _log.warning("capture_mcp_call failed — trading continues", exc_info=True)
+        logger.exception("capture_mcp_call failed — trading continues", exc_info=False)
         return ""
 
 
 # ═══════════════════════════════════════════════════════════════════ #
 #  Developer utility functions
 # ═══════════════════════════════════════════════════════════════════ #
+
 
 def _read_records(
     log_path: Path | None = None,
@@ -1267,7 +1327,7 @@ def _read_records(
                 except json.JSONDecodeError:
                     continue
     except Exception:
-        _log.warning("Failed reading trace file", exc_info=True)
+        logger.exception("Failed reading trace file", exc_info=False)
         return []
     if reverse:
         records.reverse()
@@ -1315,15 +1375,15 @@ def query_schema_changes(
 
 def _format_record(r: dict[str, Any]) -> str:
     """Pretty‑print a single record for developer display."""
-    rid    = r.get("request_id", "?")
-    ts     = r.get("timestamp_utc", "?")
-    tool   = r.get("tool_name", "?")
+    rid = r.get("request_id", "?")
+    ts = r.get("timestamp_utc", "?")
+    tool = r.get("tool_name", "?")
     attempt = r.get("attempt", "?")
-    dur    = r.get("duration_ms", "?")
-    rtype  = r.get("response_type", "?")
-    rcode  = r.get("returncode", "?")
+    dur = r.get("duration_ms", "?")
+    rtype = r.get("response_type", "?")
+    rcode = r.get("returncode", "?")
     parse_ok = r.get("json_parse_succeeded", False)
-    exc    = r.get("exception")
+    exc = r.get("exception")
     stdout_len = r.get("stdout_length_chars", 0)
     stderr_len = r.get("stderr_length_chars", 0)
 
@@ -1333,7 +1393,9 @@ def _format_record(r: dict[str, Any]) -> str:
         f"Timestamp:        {ts}",
         f"Tool:             {tool}",
         f"Attempt:          {attempt}",
-        f"Duration (ms):    {dur:.1f}" if isinstance(dur, (int, float)) else f"Duration (ms):     {dur}",
+        f"Duration (ms):    {dur:.1f}"
+        if isinstance(dur, (int, float))
+        else f"Duration (ms):     {dur}",
         f"Return code:      {rcode}",
         f"Response type:    {rtype}",
         f"JSON parse OK:    {parse_ok}",
@@ -1341,16 +1403,20 @@ def _format_record(r: dict[str, Any]) -> str:
         f"stderr chars:     {stderr_len}",
     ]
     if exc:
-        lines.append(f"Exception:        {exc.get('exception_class', '?')}: {exc.get('exception_message', '?')}")
+        lines.append(
+            f"Exception:        {exc.get('exception_class', '?')}: {exc.get('exception_message', '?')}"
+        )
 
     # Numeric anomalies
     na = r.get("numeric_anomalies")
     if na:
         lines.append(f"Numeric anomalies: {len(na)}")
         for a in na[:5]:
-            lines.append(f"  - {a.get('json_path', '?')}: {a.get('issue', '?')} (value={a.get('actual_value', '?')})")
+            lines.append(
+                f"  - {a.get('json_path', '?')}: {a.get('issue', '?')} (value={a.get('actual_value', '?')})"
+            )
         if len(na) > 5:
-            lines.append(f"  ... and {len(na)-5} more")
+            lines.append(f"  ... and {len(na) - 5} more")
 
     # Schema diff
     sd = r.get("schema_diff")
@@ -1370,6 +1436,7 @@ def _format_record(r: dict[str, Any]) -> str:
 
 
 # ── Show‑style helpers (formatted output for developers) ──
+
 
 def show_request(
     request_id: str,
@@ -1448,7 +1515,8 @@ def show_numeric_anomalies(
     """Pretty‑print records that contain numeric anomaly flags."""
     all_recs = _read_records(log_path)
     anom_recs = [
-        r for r in all_recs
+        r
+        for r in all_recs
         if r.get("numeric_anomalies") and len(r.get("numeric_anomalies", [])) > 0
     ]
     if not anom_recs:
@@ -1463,7 +1531,8 @@ def show_subprocess_failures(
     """Pretty‑print records where Claude exited non‑zero or raised."""
     all_recs = _read_records(log_path)
     fail_recs = [
-        r for r in all_recs
+        r
+        for r in all_recs
         if r.get("exception") is not None or r.get("returncode", 0) != 0
     ]
     if not fail_recs:
@@ -1491,6 +1560,8 @@ def what_did_robinhood_return(
         return "No matching records found."
 
     return _format_record(recs[0])
+
+
 # ═══════════════════════════════════════════════════════════════════ #
 #  DIRECT MCP TRANSPORT SUPPORT — appended, not a replacement
 # ═══════════════════════════════════════════════════════════════════ #
@@ -1539,7 +1610,7 @@ def _build_direct_mcp_record(
     forcing the old subprocess-shaped schema onto a fundamentally
     different transport.
     """
-    now_utc = datetime.now(timezone.utc).isoformat()
+    now_utc = datetime.now(UTC).isoformat()
     request_id = str(uuid.uuid4())
 
     # Flatten response_content's text payloads into one string for
@@ -1563,7 +1634,11 @@ def _build_direct_mcp_record(
     # Broker-controlled strings and error bodies may contain bare secrets.
     # Retain transport metadata and JSON shape, never payload values.
     safe_arguments = {key: "[REDACTED]" for key in arguments}
-    safe_exception = {"exception_class": exception_info.get("exception_class", "Error")} if exception_info else None
+    safe_exception = (
+        {"exception_class": exception_info.get("exception_class", "Error")}
+        if exception_info
+        else None
+    )
 
     record: dict[str, Any] = {
         "transport": "direct_mcp",
@@ -1635,8 +1710,12 @@ async def capture_direct_mcp_call(
                 record["schema_diff"] = {
                     "previous_keys": prev.get("keys"),
                     "current_keys": current_schema["keys"],
-                    "added": sorted(set(current_schema["keys"]) - set(prev.get("keys", []))),
-                    "removed": sorted(set(prev.get("keys", [])) - set(current_schema["keys"])),
+                    "added": sorted(
+                        set(current_schema["keys"]) - set(prev.get("keys", []))
+                    ),
+                    "removed": sorted(
+                        set(prev.get("keys", [])) - set(current_schema["keys"])
+                    ),
                 }
             await _store_schema(tool_name, current_schema)
 
@@ -1646,7 +1725,9 @@ async def capture_direct_mcp_call(
         return record.get("request_id", "")
 
     except Exception:
-        _log.warning("capture_direct_mcp_call failed — trading continues", exc_info=True)
+        logger.exception(
+            "capture_direct_mcp_call failed — trading continues", exc_info=False
+        )
         return ""
 
 
@@ -1687,11 +1768,17 @@ def show_direct_mcp_history(
         lines.append(f"Arguments:     {r.get('arguments', {})}")
         lines.append(f"Attempt:       {r.get('attempt', '?')}")
         dur = r.get("duration_ms", "?")
-        lines.append(f"Duration (ms): {dur:.1f}" if isinstance(dur, (int, float)) else f"Duration (ms): {dur}")
+        lines.append(
+            f"Duration (ms): {dur:.1f}"
+            if isinstance(dur, (int, float))
+            else f"Duration (ms): {dur}"
+        )
         lines.append(f"Success:       {r.get('success', '?')}")
         if r.get("exception"):
             exc = r["exception"]
-            lines.append(f"Exception:     {exc.get('exception_class', '?')}: {exc.get('exception_message', '?')}")
+            lines.append(
+                f"Exception:     {exc.get('exception_class', '?')}: {exc.get('exception_message', '?')}"
+            )
         na = r.get("numeric_anomalies")
         if na:
             lines.append(f"Numeric anomalies: {len(na)}")
@@ -1699,7 +1786,9 @@ def show_direct_mcp_history(
                 lines.append(f"  - {a.get('json_path', '?')}: {a.get('issue', '?')}")
         sd = r.get("schema_diff")
         if sd:
-            lines.append(f"Schema diff: added={sd.get('added')} removed={sd.get('removed')}")
+            lines.append(
+                f"Schema diff: added={sd.get('added')} removed={sd.get('removed')}"
+            )
         resp = r.get("response_text_redacted")
         if resp:
             lines.append(f"Response (first 300 chars): {resp[:300]}")

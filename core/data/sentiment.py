@@ -8,28 +8,34 @@ LOADING the sentiment model fails (with a clear, actionable error).
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import threading
 from functools import lru_cache
-from typing import List, Optional
+from typing import Self
 
-import importlib.util
-_HAS_ML_DEPS = bool(importlib.util.find_spec("torch") and importlib.util.find_spec("transformers"))
+_HAS_ML_DEPS = bool(
+    importlib.util.find_spec("torch") and importlib.util.find_spec("transformers")
+)
 torch = AutoModelForSequenceClassification = AutoTokenizer = None
 
 logger = logging.getLogger("robinhood-agent.core.data.sentiment")
 
 PRIMARY_MODEL = "AnkitAI/FinSense-ModernBERT-Financial-News-Sentiment-Analysis"
 FALLBACK_MODEL = "AnkitAI/distilbert-base-uncased-financial-news-sentiment-analysis"
+MODEL_REVISIONS = {
+    PRIMARY_MODEL: "fa8b21b6b6549ca70263ee96b9ec52aba67cd2b4",
+    FALLBACK_MODEL: "c87421d87bc24e0d78f04658e91e0b3e43eb1290",
+}
 
 
 class SentimentModel:
     """Singleton sentiment analyzer with lazy loading and GPU/CPU auto-detection."""
 
-    _instance: Optional["SentimentModel"] = None
+    _instance: SentimentModel | None = None
     _lock = threading.Lock()
 
-    def __new__(cls) -> "SentimentModel":
+    def __new__(cls) -> Self:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -38,6 +44,10 @@ class SentimentModel:
         return cls._instance
 
     def __init__(self) -> None:
+        with self._lock:
+            self._initialize()
+
+    def _initialize(self) -> None:
         if self._initialized:
             return
         self.model = None
@@ -51,7 +61,7 @@ class SentimentModel:
 
     def _load_model(self) -> None:
         """Load the sentiment model with fallback support."""
-        global torch,AutoModelForSequenceClassification,AutoTokenizer
+        global torch, AutoModelForSequenceClassification, AutoTokenizer
         if not _HAS_ML_DEPS:
             raise RuntimeError(
                 "ML dependencies not installed (torch/transformers). "
@@ -60,7 +70,8 @@ class SentimentModel:
                 "sentiment ticker selection needs this stack."
             )
         import torch
-        from transformers import AutoModelForSequenceClassification,AutoTokenizer
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
         # Determine device
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -76,10 +87,16 @@ class SentimentModel:
         for model_name in [PRIMARY_MODEL, FALLBACK_MODEL]:
             try:
                 logger.info("sentiment_model loading %s", model_name)
-                self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_name, revision=MODEL_REVISIONS[model_name], token=False
+                )
                 self.model = AutoModelForSequenceClassification.from_pretrained(
                     model_name,
-                    torch_dtype=torch.float16 if self.device.type == "cuda" else torch.float32,
+                    revision=MODEL_REVISIONS[model_name],
+                    token=False,
+                    dtype=torch.float16
+                    if self.device.type == "cuda"
+                    else torch.float32,
                 )
                 self.model.to(self.device)
                 self.model.eval()
@@ -88,15 +105,28 @@ class SentimentModel:
                 self.id2label = self.model.config.id2label
                 self.label2id = self.model.config.label2id
                 self.model_name = model_name
+                self._label_idx = self._resolve_label_indices()
 
-                logger.info("sentiment_model loaded successfully: %s (labels: %s)", model_name, self.id2label)
+                logger.info(
+                    "sentiment_model loaded successfully: %s (labels: %s)",
+                    model_name,
+                    self.id2label,
+                )
                 return
 
             except Exception as exc:
-                logger.warning("sentiment_model failed to load %s: %s", model_name, exc)
+                logger.exception(
+                    "sentiment_model failed to load %s: %s",
+                    model_name,
+                    type(exc).__name__,
+                    exc_info=False,
+                )
                 continue
 
-        raise RuntimeError("Failed to load any sentiment model (tried primary and fallback)")
+        raise RuntimeError(
+            "Failed to load any sentiment model (tried primary and fallback)"
+        )
+
     def _resolve_label_indices(self) -> tuple[int, int, int]:
         """Resolve (negative_idx, neutral_idx, positive_idx) from the loaded
         model's actual label mapping — keyword scan, never blind defaults.
@@ -126,6 +156,8 @@ class SentimentModel:
 
     def _get_sentiment_score(self, logits: torch.Tensor) -> float:
         """Convert model logits to continuous sentiment score in [-1, +1]."""
+        if logits.shape[-1] != 3 or not torch.isfinite(logits).all():
+            raise ValueError("Sentiment logits must contain three finite classes")
         probs = torch.softmax(logits, dim=-1).squeeze().cpu().numpy()
 
         # Map labels to sentiment values — resolved from the model's own
@@ -146,7 +178,9 @@ class SentimentModel:
         # Clamp to [-1, 1]
         return max(-1.0, min(1.0, score))
 
-    def score_headlines(self, headlines: List[str], batch_size: int = 16) -> List[float]:
+    def score_headlines(
+        self, headlines: list[str], batch_size: int = 16
+    ) -> list[float]:
         """Score a list of headlines, returning sentiment scores in [-1, +1].
 
         Args:
@@ -158,6 +192,12 @@ class SentimentModel:
         """
         if not headlines:
             return []
+        if (
+            isinstance(batch_size, bool)
+            or not isinstance(batch_size, int)
+            or batch_size <= 0
+        ):
+            raise ValueError("batch_size must be a positive integer")
 
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("sentiment model unavailable; no neutral placeholders")
@@ -190,8 +230,14 @@ class SentimentModel:
                     scores.append(score)
 
             except Exception as exc:
-                logger.warning("sentiment_model batch scoring failed: %s", exc)
-                raise RuntimeError("sentiment batch failed; preserve last good selection") from exc
+                logger.exception(
+                    "sentiment_model batch scoring failed: %s",
+                    type(exc).__name__,
+                    exc_info=False,
+                )
+                raise RuntimeError(
+                    "sentiment batch failed; preserve last good selection"
+                ) from exc
 
         return scores
 
@@ -204,10 +250,13 @@ class SentimentModel:
         """Return info about the loaded model."""
         return {
             "model_name": self.model_name,
-            "revision":getattr(getattr(self.model,"config",None),"_commit_hash",None),
+            "revision": getattr(
+                getattr(self.model, "config", None), "_commit_hash", None
+            ),
             "device": str(self.device),
             "labels": self.id2label,
         }
+
 
 @lru_cache(maxsize=1)
 def get_sentiment_model() -> SentimentModel:
@@ -215,7 +264,7 @@ def get_sentiment_model() -> SentimentModel:
     return SentimentModel()
 
 
-def score_news_items(headlines: List[str]) -> List[float]:
+def score_news_items(headlines: list[str]) -> list[float]:
     """Convenience function to score headlines using the singleton model."""
     model = get_sentiment_model()
     return model.score_headlines(headlines)

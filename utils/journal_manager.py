@@ -4,9 +4,9 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import List
 
 from models.decisions import JournalEntry
+from models.portfolio import PositionRecord
 from utils.persistence import atomic_json
 
 
@@ -18,7 +18,9 @@ class JournalManager:
     journal file is corrupted or missing.
     """
 
-    def __init__(self, base_dir: Path | None = None, max_entries_per_ticker: int = 90) -> None:
+    def __init__(
+        self, base_dir: Path | None = None, max_entries_per_ticker: int = 90
+    ) -> None:
         self.base_dir = (
             base_dir
             if base_dir is not None
@@ -29,10 +31,10 @@ class JournalManager:
         self.logger = logging.getLogger("robinhood-agent.utils.journal_manager")
 
     def _path_for(self, ticker: str) -> Path:
-        safe = ticker.upper()
+        safe = PositionRecord.valid_ticker(ticker)
         return self.base_dir / f"{safe}.json"
 
-    def get_recent(self, ticker: str, n: int = 10) -> List[JournalEntry]:
+    def get_recent(self, ticker: str, n: int = 10) -> list[JournalEntry]:
         """Read journals/{ticker}.json and return the last n entries (most recent last).
 
         On any read error or if file does not exist, return [].
@@ -46,7 +48,12 @@ class JournalManager:
             entries = [JournalEntry.model_validate(item) for item in data]
             return entries[-n:]
         except Exception as exc:
-            self.logger.warning("journal_read_failed ticker=%s error=%s", ticker, exc)
+            self.logger.exception(
+                "journal_read_failed ticker=%s error=%s",
+                ticker,
+                type(exc).__name__,
+                exc_info=False,
+            )
             return []
 
     def append(self, ticker: str, entry: JournalEntry) -> None:
@@ -62,27 +69,39 @@ class JournalManager:
                 try:
                     existing_raw = path.read_text(encoding="utf-8")
                     existing = json.loads(existing_raw) if existing_raw else []
-                except (OSError,ValueError) as exc:
-                    self.logger.error("journal_corrupt_preserved ticker=%s error=%s",ticker,exc)
+                except (OSError, ValueError) as exc:
+                    self.logger.error(
+                        "journal_corrupt_preserved ticker=%s error=%s", ticker, exc
+                    )
                     return False
-            if entry.event_id and any(r.get("event_id")==entry.event_id for r in existing):return True
+            if entry.event_id and any(
+                r.get("event_id") == entry.event_id for r in existing
+            ):
+                return True
 
             payload = existing + [entry.model_dump(mode="json")]
             # trim to most recent max_entries_per_ticker
             trimmed = payload[-self.max_entries_per_ticker :]
-            atomic_json(path,trimmed)
+            atomic_json(path, trimmed)
             return True
         except Exception as exc:
-            self.logger.warning("journal_write_failed ticker=%s error=%s", ticker, exc)
+            self.logger.exception(
+                "journal_write_failed ticker=%s error=%s",
+                ticker,
+                type(exc).__name__,
+                exc_info=False,
+            )
             return False
 
-    def get_all_tickers(self) -> List[str]:
+    def get_all_tickers(self) -> list[str]:
         """Return list of ticker names present in the journals directory."""
         try:
             files = [p for p in self.base_dir.glob("*.json") if p.is_file()]
             return [p.stem for p in files]
         except Exception as exc:
-            self.logger.warning("journal_list_failed: %s", exc)
+            self.logger.exception(
+                "journal_list_failed: %s", type(exc).__name__, exc_info=False
+            )
             return []
 
     def summarise_for_prompt(self, ticker: str, n: int = 15) -> str:
@@ -111,26 +130,39 @@ class JournalManager:
         # Filter to entries that have actual price data (current_price > 0).
         # Zero-price entries are data-outage sessions; skip them so the
         # trajectory is not polluted with phantom $0 points.
-        valid = [e for e in entries if isinstance(e.key_metrics, dict) and float(e.key_metrics.get("current_price", 0.0)) > 0.0]
+        valid = [
+            e
+            for e in entries
+            if isinstance(e.key_metrics, dict)
+            and float(e.key_metrics.get("current_price", 0.0)) > 0.0
+        ]
 
         shown = min(len(valid), n)
         if not valid:
             return f"No price/metric data available for {ticker} (all recent sessions had price=0)."
 
-        lines = [f"--- Historical PRICE/METRIC trajectory for {ticker} (oldest→newest, last {shown} sessions with price data; DECISIONS deliberately omitted) ---"]
+        lines = [
+            f"--- Historical PRICE/METRIC trajectory for {ticker} (oldest→newest, last {shown} sessions with price data; DECISIONS deliberately omitted) ---"
+        ]
 
         # Safe numeric formatters — coerce None/missing to 0 so the
         # method never crashes on a bare :.2f format spec.
         def _num(v, spec: str = ".2f") -> str:
             try:
                 return format(float(v if v is not None else 0.0), spec)
-            except Exception:
+            except Exception as error:
+                logging.getLogger(__name__).exception(
+                    "Handled failure type=%s", type(error).__name__, exc_info=False
+                )
                 return "—"
 
         def _pct(v) -> str:
             try:
                 return f"{float(v if v is not None else 0.0):+.2f}%"
-            except Exception:
+            except Exception as error:
+                logging.getLogger(__name__).exception(
+                    "Handled failure type=%s", type(error).__name__, exc_info=False
+                )
                 return "—"
 
         for entry in valid[-n:]:
@@ -138,10 +170,17 @@ class JournalManager:
                 try:
                     dt = datetime.fromisoformat(entry.timestamp)
                     timestr = dt.strftime("%Y-%m-%d %H:%M")
-                except Exception:
+                except Exception as error:
+                    logging.getLogger(__name__).exception(
+                        "Handled failure type=%s", type(error).__name__, exc_info=False
+                    )
                     timestr = entry.timestamp
                 km = entry.key_metrics if isinstance(entry.key_metrics, dict) else {}
-                price_str = _num(km.get("current_price"), ".2f") if km.get("current_price") else "—"
+                price_str = (
+                    _num(km.get("current_price"), ".2f")
+                    if km.get("current_price")
+                    else "—"
+                )
                 line = (
                     f"[{timestr} {entry.cycle_type}] "
                     f"price={price_str} | "
@@ -157,8 +196,13 @@ class JournalManager:
                     f"vs20dma={_pct(km.get('distance_from_20dma'))}"
                 )
                 lines.append(line)
-            except Exception:
+            except Exception as error:
                 # Best-effort fallback: just timestamp + cycle, skip if broken
-                lines.append(f"[{entry.timestamp} {entry.cycle_type}] (metrics unavailable)")
+                logging.getLogger(__name__).exception(
+                    "Handled failure type=%s", type(error).__name__, exc_info=False
+                )
+                lines.append(
+                    f"[{entry.timestamp} {entry.cycle_type}] (metrics unavailable)"
+                )
         lines.append("--- end metrics ---")
         return "\n".join(lines)

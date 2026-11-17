@@ -1,8 +1,10 @@
 """Measured advisory triggers E5–E12; none can veto or delay a hard stop."""
 
+import itertools
 import math
 import statistics as stats
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from .exit_state import queue_review
 
 
@@ -11,7 +13,7 @@ def trading_sessions(entry, now=None):
 
     if _NYSE is None or not entry:
         return None
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     try:
         start = datetime.fromisoformat(entry).date()
         sessions = _NYSE.schedule(start_date=start, end_date=now.date())
@@ -66,7 +68,7 @@ def climax(bars, rsi, cfg):
     if len(bars) < 21 or rsi is None or rsi < cfg.get("rsi_min", 80):
         return None
     closes = [b.close for b in bars[-21:]]
-    returns = [b / a - 1 for a, b in zip(closes, closes[1:])]
+    returns = [b / a - 1 for a, b in itertools.pairwise(closes)]
     largest = max(returns)
     recent_largest = largest > 0 and any(v == largest for v in returns[-3:])
     sd = stats.pstdev(closes[-20:])
@@ -103,7 +105,7 @@ def pead(event, history, cfg):
             not release.tzinfo
             or not cutoff.tzinfo
             or cutoff < release
-            or cutoff > datetime.now(timezone.utc)
+            or cutoff > datetime.now(UTC)
         ):
             raise ValueError("invalid event data cutoff")
     except (ValueError, TypeError):
@@ -121,7 +123,8 @@ def pead(event, history, cfg):
     def bucket(s):
         return 0 if s < 0.05 else 1 if s < 0.10 else 2
 
-    peers = [];seen=set()
+    peers = []
+    seen = set()
     for h in history:
         try:
             available = datetime.fromisoformat(h["available_at"])
@@ -129,7 +132,8 @@ def pead(event, history, cfg):
                 available.tzinfo
                 and available < release
                 and h.get("source")
-                and h.get("event_id") and h["event_id"] not in seen
+                and h.get("event_id")
+                and h["event_id"] not in seen
                 and h.get("surprise", -1) > 0
                 and bucket(h["surprise"]) == bucket(surprise)
             ):
@@ -159,7 +163,9 @@ def pead(event, history, cfg):
                 - 1.96 * stats.stdev(sample) / math.sqrt(len(sample)),
                 stats.mean(sample)
                 + 1.96 * stats.stdev(sample) / math.sqrt(len(sample)),
-            ] if len(sample)>=2 else None,
+            ]
+            if len(sample) >= 2
+            else None,
         }
     expected = curve["15"]["mean"]
     if expected <= 1e-4:
@@ -222,7 +228,7 @@ def nightly_signals(
     now=None,
 ):
     cfg = settings["exits"]
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     signals = {}
     unavailable = {}
     trend = trend_break(
@@ -294,8 +300,11 @@ def nightly_signals(
                 "gap_progress": progress,
             }
     from utils.freshness import fresh_timestamp
-    if pead_event and not fresh_timestamp(pead_event.get("data_cutoff"),5*86400,now):
-        pead_event=None
+
+    if pead_event and not fresh_timestamp(
+        pead_event.get("data_cutoff"), 5 * 86400, now
+    ):
+        pead_event = None
     measured = (
         pead(pead_event, pead_history, cfg["pead"])
         if cfg["pead"]["enabled"]
@@ -327,7 +336,7 @@ def nightly_signals(
 
 
 def monitor_advisories(record, price, settings, *, prior_high=None, now=None):
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     cfg = settings["exits"]["specialized_review"]
     for kind, reference in (
         ("DROP_FROM_PEAK", record.peak_price),
@@ -343,8 +352,10 @@ def monitor_advisories(record, price, settings, *, prior_high=None, now=None):
         memory = record.trigger_memory.setdefault(kind, {"active": False})
         if drawdown < threshold * 0.5:
             memory["active"] = False
-        if drawdown >= threshold and not memory["active"]:
-            if queue_review(
+        if (
+            drawdown >= threshold
+            and not memory["active"]
+            and queue_review(
                 record,
                 kind,
                 {
@@ -356,8 +367,9 @@ def monitor_advisories(record, price, settings, *, prior_high=None, now=None):
                 cooldown_hours=cfg["review_cooldown_hours"],
                 now=now,
                 rearm=True,
-            ):
-                memory["active"] = True
+            )
+        ):
+            memory["active"] = True
     if cfg["fifty_two_week_high_review"] and prior_high and price >= prior_high:
         previous = record.trigger_memory.get("last_high_review_price")
         rearm = previous is None or (

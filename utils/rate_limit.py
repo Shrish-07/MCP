@@ -4,6 +4,7 @@ Originally lived in core/weekly_news.py; promoted here so every outbound
 HTTP component (daily NewsFetcher, WeeklyNewsFetcher) uses the same
 discipline against Finnhub's free-tier limit.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +17,8 @@ _shared = None
 
 def finnhub_limiter():
     global _shared
-    if _shared is None:_shared=RateLimiter(max_calls_per_minute=55)
+    if _shared is None:
+        _shared = RateLimiter(max_calls_per_minute=55)
     return _shared
 
 
@@ -41,5 +43,7 @@ class RateLimiter:
                     self.logger.info("rate_limit_wait %.1fs", wait_time)
                     await asyncio.sleep(wait_time)
                     now = datetime.now()
-                    self.calls = [c for c in self.calls if (now - c).total_seconds() < 60]
+                    self.calls = [
+                        c for c in self.calls if (now - c).total_seconds() < 60
+                    ]
             self.calls.append(datetime.now())

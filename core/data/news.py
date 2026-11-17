@@ -6,7 +6,7 @@ Haiku summarizer/fallback was removed; neither feature was enabled).
 
 Features:
 - Finnhub company-news + general market news
-- ID-based deduplication (cycles only show articles once per calendar day)
+- Newest-first fresh evidence retained across intraday cycles
 - Freshness window filter + per-ticker cap
 - Shared sliding-window rate limiter (55 calls/min, under Finnhub's 60)
 - Retries with exponential backoff + jitter on HTTP/transient failures
@@ -36,8 +36,8 @@ class NewsFetcher:
 
     Each fetched article is parsed into a ``NewsItem``.  Deduplication
     uses Finnhub's ``id`` field, persisted to ``data/seen_headlines.json``
-    so MID and CLOSE cycles don't re-surface the same articles within
-    the same calendar day.
+    for delivery diagnostics; fresh catalysts remain available to every
+    decision cycle. Monitor reads do not consume delivery state.
     """
 
     def __init__(
@@ -47,7 +47,11 @@ class NewsFetcher:
         max_retries: int = 3,
     ) -> None:
         self.logger = logging.getLogger("robinhood-agent.core.data.news")
-        self._seen_path = Path(__file__).resolve().parent.parent.parent / "data" / "seen_headlines.json"
+        self._seen_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "data"
+            / "seen_headlines.json"
+        )
         self._seen_path.parent.mkdir(parents=True, exist_ok=True)
 
         cfg = settings or {}
@@ -60,6 +64,7 @@ class NewsFetcher:
         self._gm_category: str = str(gm.get("category", "general"))
         self._gm_count: int = int(gm.get("count", 8))
         self._max_retries = max_retries
+        self.max_retries = max_retries
         self._rate_limiter = finnhub_limiter()
 
     # ------------------------------------------------------------------
@@ -87,7 +92,6 @@ class NewsFetcher:
 
         # Full seen-set — previously this silently sliced to [118:], which
         # re-admitted old headlines whenever fewer than 119 ids were stored.
-        seen_ids: set[int] = set(existing_ids)
 
         result: dict[str, list[NewsItem]] = {}
         if not self._api_key:
@@ -108,38 +112,49 @@ class NewsFetcher:
                 try:
                     sym, items = await task
                 except Exception as exc:
-                    self.logger.warning("news_fetch_failed task error=%s", exc)
+                    self.logger.exception(
+                        "news_fetch_failed task error=%s",
+                        type(exc).__name__,
+                        exc_info=False,
+                    )
                     continue
                 result[sym] = items
 
             gm_items: list[NewsItem] = []
             if self._gm_enabled:
-                gm_raw = await self._fetch_general_news(http)
-                gm_items = self._parse_items(gm_raw, "MARKET")
+                try:
+                    gm_raw = await self._fetch_general_news(http)
+                    gm_items = self._parse_items(gm_raw, "MARKET")
+                except Exception as exc:
+                    self.logger.exception(
+                        "general_news_failed type=%s",
+                        type(exc).__name__,
+                        exc_info=False,
+                    )
 
         new_ids: set[int] = set()
         for sym, items in result.items():
             fresh: list[NewsItem] = []
-            for it in items:
-                if it.id in seen_ids:
-                    continue
-                age_h = (datetime.now(UTC) - datetime.fromtimestamp(it.datetime, tz=UTC)).total_seconds() / 3600.0
+            for it in sorted(items, key=lambda item: item.datetime, reverse=True):
+                age_h = (
+                    datetime.now(UTC) - datetime.fromtimestamp(it.datetime, tz=UTC)
+                ).total_seconds() / 3600.0
                 if age_h > self._fresh_window_hours:
                     continue
                 fresh.append(it)
-                new_ids.add(it.id)
+
             result[sym] = fresh[: self._max_per_ticker]
 
         if gm_items:
             fresh_gm: list[NewsItem] = []
-            for it in gm_items:
-                if it.id in seen_ids:
-                    continue
-                age_h = (datetime.now(UTC) - datetime.fromtimestamp(it.datetime, tz=UTC)).total_seconds() / 3600.0
+            for it in sorted(gm_items, key=lambda item: item.datetime, reverse=True):
+                age_h = (
+                    datetime.now(UTC) - datetime.fromtimestamp(it.datetime, tz=UTC)
+                ).total_seconds() / 3600.0
                 if age_h > self._fresh_window_hours:
                     continue
                 fresh_gm.append(it)
-                new_ids.add(it.id)
+
             fresh_gm = fresh_gm[: self._gm_count]
             if fresh_gm:
                 result["MARKET"] = fresh_gm
@@ -152,7 +167,9 @@ class NewsFetcher:
             if result.get(t) is None:
                 result[t] = []
 
-        self._persist_seen(day_key, existing_ids, new_ids)
+        if cycle_type != "MONITOR":
+            new_ids = {item.id for selected in result.values() for item in selected}
+            self._persist_seen(day_key, existing_ids, new_ids)
         return result
 
     # ------------------------------------------------------------------
@@ -164,10 +181,15 @@ class NewsFetcher:
             return {}
         try:
             return json.loads(self._seen_path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).exception(
+                "Handled failure type=%s", type(error).__name__, exc_info=False
+            )
             return {}
 
-    def _persist_seen(self, day_key: str, existing_ids: list[int], new_ids: set[int]) -> None:
+    def _persist_seen(
+        self, day_key: str, existing_ids: list[int], new_ids: set[int]
+    ) -> None:
         """Write today's merged id list (rolling prune to last ~400)."""
         try:
             merged = list(dict.fromkeys(existing_ids + sorted(new_ids)))[-400:]
@@ -176,18 +198,21 @@ class NewsFetcher:
                 encoding="utf-8",
             )
         except Exception as exc:
-            self.logger.warning("seen_headlines_persist_failed: %s", exc)
+            self.logger.exception(
+                "seen_headlines_persist_failed: %s", type(exc).__name__, exc_info=False
+            )
 
     # ------------------------------------------------------------------
     # Finnhub fetchers (rate-limited + retried)
     # ------------------------------------------------------------------
 
-    async def _fetch_with_retry(self, http: httpx.AsyncClient, endpoint: str,
-                                params: dict, label: str) -> list:
+    async def _fetch_with_retry(
+        self, http: httpx.AsyncClient, endpoint: str, params: dict, label: str
+    ) -> list:
         """GET one Finnhub endpoint with the shared rate limiter and
         exponential-backoff retries. Failures degrade to []."""
         params = {**params, "token": self._api_key}
-        for attempt in range(self.max_retries):
+        for attempt in range(self._max_retries):
             await self._rate_limiter.acquire()
             try:
                 r = await http.get(endpoint, params=params)
@@ -198,15 +223,32 @@ class NewsFetcher:
                 status = exc.response.status_code
                 if 400 <= status < 500 and status != 429:
                     # Client error (bad key, bad params) — retrying won't help.
-                    self.logger.warning("finnhub_client_error %s status=%s label=%s", endpoint, status, label)
+                    self.logger.warning(
+                        "finnhub_client_error %s status=%s label=%s",
+                        endpoint,
+                        status,
+                        label,
+                    )
                     return []
-                self.logger.warning("finnhub_http_retryable label=%s status=%s attempt=%d",
-                                    label, status, attempt + 1)
-                await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
+                self.logger.warning(
+                    "finnhub_http_retryable label=%s status=%s attempt=%d",
+                    label,
+                    status,
+                    attempt + 1,
+                )
+                await asyncio.sleep((2**attempt) + random.uniform(0, 1))
             except Exception as exc:
-                self.logger.warning("finnhub_error label=%s attempt=%d error=%s", label, attempt + 1, exc)
-                await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
-        self.logger.error("finnhub_failed label=%s after %d attempts", label, self.max_retries)
+                self.logger.exception(
+                    "finnhub_error label=%s attempt=%d error=%s",
+                    label,
+                    attempt + 1,
+                    type(exc).__name__,
+                    exc_info=False,
+                )
+                await asyncio.sleep((2**attempt) + random.uniform(0, 1))
+        self.logger.error(
+            "finnhub_failed label=%s after %d attempts", label, self._max_retries
+        )
         return []
 
     async def _fetch_company_news(self, http: httpx.AsyncClient, symbol: str) -> list:
@@ -219,7 +261,9 @@ class NewsFetcher:
 
     async def _fetch_general_news(self, http: httpx.AsyncClient) -> list:
         params = {"category": self._gm_category}
-        return await self._fetch_with_retry(http, _FINNHUB_GENERAL_NEWS, params, "general_market")
+        return await self._fetch_with_retry(
+            http, _FINNHUB_GENERAL_NEWS, params, "general_market"
+        )
 
     @staticmethod
     def _parse_items(raw: list, related: str) -> list[NewsItem]:
@@ -239,6 +283,9 @@ class NewsFetcher:
                         datetime=int(art.get("datetime", 0)),
                     )
                 )
-            except Exception:
+            except Exception as error:
+                logging.getLogger(__name__).exception(
+                    "Handled failure type=%s", type(error).__name__, exc_info=False
+                )
                 continue
         return items

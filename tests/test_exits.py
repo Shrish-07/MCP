@@ -1,10 +1,12 @@
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
+
 import pytest
+
+from core.exits.exit_state import finish_review, graduate
 from core.exits.trail_manager import update_trail, wilder_atr
-from core.exits.exit_state import graduate, finish_review
+from core.simulation import replay
 from models.market_data import EquityQuote, OHLCVBar
 from models.portfolio import PositionRecord
-from core.simulation import replay
 
 
 def record():
@@ -17,7 +19,7 @@ def record():
         trail_stop_px=93,
         effective_stop_px=93,
         atr14=2,
-        atr_date=datetime.now(timezone.utc).date().isoformat(),
+        atr_date=datetime.now(UTC).date().isoformat(),
     )
 
 
@@ -29,7 +31,7 @@ def quote(price, stamp=None):
         ask=price,
         volume=1,
         prev_close=100,
-        timestamp=stamp or datetime.now(timezone.utc).isoformat(),
+        timestamp=stamp or datetime.now(UTC).isoformat(),
     )
 
 
@@ -70,7 +72,7 @@ def test_bad_quote_does_not_mutate_peak():
     with pytest.raises(ValueError):
         update_trail(
             r,
-            quote(120, (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()),
+            quote(120, (datetime.now(UTC) - timedelta(minutes=5)).isoformat()),
             {},
         )
     assert r.peak_price == 100
@@ -95,7 +97,7 @@ def test_wilder_atr_uses_true_range_and_smoothing():
 
 
 def test_replay_partial_fills_gap_and_restart(tmp_path):
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     ticks = [
         ((now + timedelta(seconds=i * 15)).isoformat(), px)
         for i, px in enumerate([100, 106, 109, 98, 96, 95, 94])
@@ -120,7 +122,7 @@ def test_split_adjusts_consistent_price_basis(pm):
         2,
         {
             "source": "test verified split",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
         },
     )
     r = pm.get_open_records()[0]
@@ -129,7 +131,8 @@ def test_split_adjusts_consistent_price_basis(pm):
 
 
 def test_graduation_sell_tracks_execution_until_fill(pm):
-    from test_p0_safety import seed, decision, result
+    from test_p0_safety import decision, result, seed
+
     seed(pm)
     record = pm.get_open_records()[0]
     graduate(record, 125, {})
@@ -142,9 +145,10 @@ def test_graduation_sell_tracks_execution_until_fill(pm):
     key = pm.create_order(sell, "sell", 2, 125)
     pm.update_order(key, result("SUBMITTED", qty=0, side="sell"))
     pm.update_order(key, result("PARTIALLY_FILLED", qty=1, side="sell"))
-    assert pm.get_open_records()[0].review_events["GRADUATION"]["state"] == "PARTIALLY_FILLED"
+    assert (
+        pm.get_open_records()[0].review_events["GRADUATION"]["state"]
+        == "PARTIALLY_FILLED"
+    )
     pm.update_order(key, result("REJECTED", qty=1, side="sell"))
     assert pm.get_open_records()[0].review_events["GRADUATION"]["state"] == "RETRY"
     assert pm.get_open_records()[0].quantity == 1
-
-

@@ -1,6 +1,6 @@
 """Unit tests for ticker selector logic."""
 
-from core.weekly.ticker_selector import select_universe, filter_candidates
+from core.weekly.ticker_selector import filter_candidates, select_universe
 
 
 class TestSelectUniverse:

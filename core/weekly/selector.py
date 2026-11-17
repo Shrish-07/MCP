@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -13,9 +13,10 @@ import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from core.data.sentiment import get_sentiment_model
+from core.position.manager import PositionManager
 from core.weekly.news import WeeklyNewsFetcher
 from core.weekly.ticker_selector import select_universe
-from core.position.manager import PositionManager
+from utils.persistence import atomic_json
 
 logger = logging.getLogger("robinhood-agent.core.weekly.selector")
 
@@ -39,7 +40,11 @@ class WeeklySelector:
         self.selected_universe_path = self.data_dir / "selected_universe.json"
         self.candidate_universe_path = self.data_dir / "candidate_universe.json"
 
-        self.position_manager = position_manager if position_manager is not None else PositionManager(config=config)
+        self.position_manager = (
+            position_manager
+            if position_manager is not None
+            else PositionManager(config=config)
+        )
         self.news_fetcher = WeeklyNewsFetcher(lookback_days=self.lookback_days)
         self.sentiment_model = None  # Lazy load
 
@@ -55,56 +60,115 @@ class WeeklySelector:
         # stays None and run_selection degrades safely (keeps the previous
         # universe) instead of crashing the whole agent.
         try:
-            self.sentiment_model = await asyncio.to_thread(get_sentiment_model) if self.enabled else None
+            self.sentiment_model = (
+                await asyncio.to_thread(get_sentiment_model) if self.enabled else None
+            )
         except Exception as exc:
-            self.logger.warning("sentiment_model_unavailable (%s) — weekly selection will keep previous universe", exc)
+            self.logger.exception(
+                "sentiment_model_unavailable (%s) — weekly selection will keep previous universe",
+                type(exc).__name__,
+                exc_info=False,
+            )
             self.sentiment_model = None
         self.logger.info(
             "weekly_selector_initialized candidates=%d previous_selection=%d",
-            len(self.candidate_universe), len(self.selected_universe),
+            len(self.candidate_universe),
+            len(self.selected_universe),
         )
 
     async def _load_candidate_universe(self) -> list[str]:
         """Load the candidate universe from file."""
         try:
-            with open(self.candidate_universe_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                tickers = data.get("tickers", [])
-                self.logger.info("Loaded %d candidate tickers", len(tickers))
-                return tickers
+            data = json.loads(
+                await asyncio.to_thread(
+                    self.candidate_universe_path.read_text, encoding="utf-8"
+                )
+            )
+            tickers = data.get("tickers", [])
+            self.logger.info("Loaded %d candidate tickers", len(tickers))
+            return tickers
         except FileNotFoundError:
             self.logger.warning("Candidate universe file not found, using defaults")
             return self._get_default_universe()
         except Exception as exc:
-            self.logger.error("Failed to load candidate universe: %s", exc)
+            self.logger.exception(
+                "Failed to load candidate universe: %s",
+                type(exc).__name__,
+                exc_info=False,
+            )
             return self._get_default_universe()
 
     def _get_default_universe(self) -> list[str]:
         """Default liquid universe if the candidate file is missing."""
         return [
-            "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA",
-            "JPM", "V", "JNJ", "WMT", "PG", "MA", "HD", "DIS",
-            "NFLX", "ADBE", "INTC", "AMD", "CAT", "BA", "XOM", "COST",
-            "UNH", "AVGO", "MU", "TSM", "GS", "MS", "SBUX", "MCD",
-            "NKE", "CRM", "PYPL", "QCOM", "TXN", "HON", "IBM", "ORCL",
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "AMZN",
+            "TSLA",
+            "META",
+            "NVDA",
+            "JPM",
+            "V",
+            "JNJ",
+            "WMT",
+            "PG",
+            "MA",
+            "HD",
+            "DIS",
+            "NFLX",
+            "ADBE",
+            "INTC",
+            "AMD",
+            "CAT",
+            "BA",
+            "XOM",
+            "COST",
+            "UNH",
+            "AVGO",
+            "MU",
+            "TSM",
+            "GS",
+            "MS",
+            "SBUX",
+            "MCD",
+            "NKE",
+            "CRM",
+            "PYPL",
+            "QCOM",
+            "TXN",
+            "HON",
+            "IBM",
+            "ORCL",
         ]
 
     async def _load_selected_universe(self) -> list[str]:
         """Load previously selected universe."""
         try:
-            with open(self.selected_universe_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                tickers = data.get("tickers", [])
-                self.logger.info("Loaded previous selection from %s", data.get("timestamp", ""))
-                return tickers
+            data = json.loads(
+                await asyncio.to_thread(
+                    self.selected_universe_path.read_text, encoding="utf-8"
+                )
+            )
+            tickers = data.get("tickers", [])
+            self.logger.info(
+                "Loaded previous selection from %s", data.get("timestamp", "")
+            )
+            return tickers
         except FileNotFoundError:
             self.logger.info("No previous selection found")
             return []
         except Exception as exc:
-            self.logger.error("Failed to load selected universe: %s", exc)
+            self.logger.exception(
+                "Failed to load selected universe: %s",
+                type(exc).__name__,
+                exc_info=False,
+            )
             return []
 
-    async def _save_selected_universe(self, tickers: list[str], scores: dict[str, float]) -> None:
+    async def _save_selected_universe(
+        self, tickers: list[str], scores: dict[str, float]
+    ) -> None:
         """Save selected universe to file."""
         try:
             data = {
@@ -113,23 +177,39 @@ class WeeklySelector:
                 "timestamp": datetime.now(pytz.UTC).isoformat(),
                 "universe_size": self.universe_size,
             }
-            with open(self.selected_universe_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            await asyncio.to_thread(atomic_json, self.selected_universe_path, data)
             self.logger.info("Saved selection of %d tickers", len(tickers))
         except Exception as exc:
-            self.logger.error("Failed to save selected universe: %s", exc)
+            self.logger.exception(
+                "Failed to save selected universe: %s",
+                type(exc).__name__,
+                exc_info=False,
+            )
 
     def get_current_holdings(self) -> set[str]:
         """Get currently held tickers from position manager."""
         try:
-            if hasattr(self.position_manager,"reconciliation_ok") and not self.position_manager.reconciliation_ok:
-                raise RuntimeError("broker holdings not verified; retain previous selection")
+            if (
+                hasattr(self.position_manager, "reconciliation_ok")
+                and not self.position_manager.reconciliation_ok
+            ):
+                raise RuntimeError(
+                    "broker holdings not verified; retain previous selection"
+                )
             open_records = self.position_manager.get_open_records()
-            held_tickers = {record.ticker for record in open_records if record.quantity > 0}
-            self.logger.info("current_holdings count=%d tickers=%s", len(held_tickers), sorted(held_tickers))
+            held_tickers = {
+                record.ticker for record in open_records if record.quantity > 0
+            }
+            self.logger.info(
+                "current_holdings count=%d tickers=%s",
+                len(held_tickers),
+                sorted(held_tickers),
+            )
             return held_tickers
         except Exception as exc:
-            self.logger.error("Failed to get current holdings: %s", exc)
+            self.logger.exception(
+                "Failed to get current holdings: %s", type(exc).__name__, exc_info=False
+            )
             raise
 
     async def fetch_news_and_scores(self, tickers: list[str]) -> dict[str, float]:
@@ -145,7 +225,8 @@ class WeeklySelector:
              it never aborts the whole scoring pass.
         """
         self.logger.info("Fetching news for %d tickers...", len(tickers))
-        if self.sentiment_model is None:raise RuntimeError("sentiment model unavailable; retain previous selection")
+        if self.sentiment_model is None:
+            raise RuntimeError("sentiment model unavailable; retain previous selection")
         news_dict = await self.news_fetcher.fetch_news_for_universe(tickers)
 
         self.logger.info("Scoring news...")
@@ -162,12 +243,20 @@ class WeeklySelector:
                 continue
 
             try:
-                scores_list = await asyncio.to_thread(self.sentiment_model.score_headlines,headlines)
+                scores_list = await asyncio.to_thread(
+                    self.sentiment_model.score_headlines, headlines
+                )
                 # Ticker score = MEAN of per-headline sentiment scores
-                scores[ticker] = sum(scores_list) / len(scores_list) if scores_list else 0.0
+                scores[ticker] = (
+                    sum(scores_list) / len(scores_list) if scores_list else 0.0
+                )
             except Exception as exc:
-                self.logger.error("Failed to score %s: %s", ticker, exc)
-                raise RuntimeError(f"sentiment inference failed for {ticker}; retain previous universe") from exc
+                self.logger.exception(
+                    "Failed to score %s: %s", ticker, type(exc).__name__, exc_info=False
+                )
+                raise RuntimeError(
+                    f"sentiment inference failed for {ticker}; retain previous universe"
+                ) from exc
 
         self.logger.info("Scored %d tickers", len(scores))
         return scores
@@ -179,20 +268,28 @@ class WeeklySelector:
         the bot is never left with an empty/missing universe after a failure.
         """
         if self.selected_universe:
-            self.logger.info("fallback=previous_selection size=%d", len(self.selected_universe))
+            self.logger.info(
+                "fallback=previous_selection size=%d", len(self.selected_universe)
+            )
             return list(self.selected_universe)
         # Try reloading the persisted universe from disk (in-memory state may
         # be empty on a fresh process even though a previous selection exists).
         try:
             if self.selected_universe_path.exists():
-                with open(self.selected_universe_path, "r", encoding="utf-8") as f:
-                    tickers = json.load(f).get("tickers", [])
+                data = json.loads(
+                    await asyncio.to_thread(
+                        self.selected_universe_path.read_text, encoding="utf-8"
+                    )
+                )
+                tickers = data.get("tickers", [])
                 if tickers:
                     self.logger.info("fallback=persisted_file size=%d", len(tickers))
                     self.selected_universe = list(tickers)
                     return list(tickers)
         except Exception as exc:
-            self.logger.error("fallback_reload_failed: %s", exc)
+            self.logger.exception(
+                "fallback_reload_failed: %s", type(exc).__name__, exc_info=False
+            )
         default = self._get_default_universe()[: self.universe_size]
         self.logger.warning("fallback=static_default_universe size=%d", len(default))
         return default
@@ -213,22 +310,26 @@ class WeeklySelector:
             current_holdings = self.get_current_holdings()
             self.logger.info("protected_tickers=%s", sorted(current_holdings))
 
-            all_candidates = sorted(set(self.candidate_universe) | set(self.selected_universe))
+            all_candidates = sorted(
+                set(self.candidate_universe) | set(self.selected_universe)
+            )
             self.logger.info("scoring %d candidates", len(all_candidates))
 
             scores = await self.fetch_news_and_scores(all_candidates)
 
             # The integrated contract counts NEW candidates independently of
             # holdings. Standalone legacy callers keep their old contract.
-            discovery_cfg=self.config.get("discovery",{})
-            new_contract=bool(discovery_cfg.get("shortlist"))
+            discovery_cfg = self.config.get("discovery", {})
+            new_contract = bool(discovery_cfg.get("shortlist"))
             if new_contract:
-                scores={t:s for t,s in scores.items() if t not in current_holdings}
+                scores = {t: s for t, s in scores.items() if t not in current_holdings}
 
             selected = select_universe(
                 held_tickers=set() if new_contract else current_holdings,
                 scored_candidates=scores,
-                universe_size=discovery_cfg["shortlist"]["new_candidate_count"] if new_contract else self.universe_size,
+                universe_size=discovery_cfg["shortlist"]["new_candidate_count"]
+                if new_contract
+                else self.universe_size,
                 max_positions=self.max_positions,
                 min_sentiment_score=self.min_sentiment_score,
             )
@@ -241,9 +342,11 @@ class WeeklySelector:
             self.selected_universe = selected
             return selected
         except Exception as exc:
-            self.logger.error(
+            self.logger.exception(
                 "weekly_selection_failed, keeping previous universe: %s: %s",
-                type(exc).__name__, exc,
+                type(exc).__name__,
+                type(exc).__name__,
+                exc_info=False,
             )
             return await self._fallback_universe()
 
@@ -277,10 +380,17 @@ class WeeklySelector:
             )
             self.logger.info(
                 "weekly_scheduler_registered day=%s hour=%d minute=%d tz=%s",
-                day_of_week, hour, minute, timezone_str,
+                day_of_week,
+                hour,
+                minute,
+                timezone_str,
             )
         except Exception as exc:
-            self.logger.error("weekly_scheduler_registration_failed: %s", exc)
+            self.logger.exception(
+                "weekly_scheduler_registration_failed: %s",
+                type(exc).__name__,
+                exc_info=False,
+            )
 
     async def run_now(self) -> list[str]:
         """Manually trigger selection (for testing / startup catch-up)."""
@@ -302,13 +412,16 @@ class WeeklySelector:
 _weekly_selector: WeeklySelector | None = None
 
 
-async def get_weekly_selector(config: dict[str, Any],position_manager=None) -> WeeklySelector:
+async def get_weekly_selector(
+    config: dict[str, Any], position_manager=None
+) -> WeeklySelector:
     """Get or create the weekly selector singleton."""
     global _weekly_selector
     if _weekly_selector is None:
-        _weekly_selector = WeeklySelector(config,position_manager=position_manager)
+        _weekly_selector = WeeklySelector(config, position_manager=position_manager)
         await _weekly_selector.initialize()
-    if position_manager is not None:_weekly_selector.position_manager=position_manager
+    if position_manager is not None:
+        _weekly_selector.position_manager = position_manager
     return _weekly_selector
 
 

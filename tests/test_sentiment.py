@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 import pytest
 
 from core.data.sentiment import get_sentiment_model, score_single_headline
@@ -23,8 +22,12 @@ def test_sentiment_model_loads():
 
 def test_sentiment_scoring_range():
     """Scores should be in [-1.0, +1.0] with correct sign for known examples."""
-    positive = score_single_headline("Apple beats earnings expectations with record revenue growth")
-    negative = score_single_headline("Tesla announces massive layoffs amid declining sales")
+    positive = score_single_headline(
+        "Apple beats earnings expectations with record revenue growth"
+    )
+    negative = score_single_headline(
+        "Tesla announces massive layoffs amid declining sales"
+    )
     neutral = score_single_headline("Company X Y Z announces minor product update")
 
     assert -1.0 <= positive <= 1.0
@@ -34,3 +37,11 @@ def test_sentiment_scoring_range():
     assert positive > 0.5, f"positive headline scored {positive}"
     assert negative < -0.5, f"negative headline scored {negative}"
     assert abs(neutral) < 0.5, f"neutral headline scored {neutral}"
+
+
+def test_nonfinite_model_logits_cannot_become_bullish_scores():
+    import torch
+
+    model = get_sentiment_model()
+    with pytest.raises(ValueError, match="finite"):
+        model._get_sentiment_score(torch.tensor([[0.0, float("nan"), 1.0]]))

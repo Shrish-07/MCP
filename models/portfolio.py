@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, ConfigDict, field_validator,model_validator
 import re
 from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class PositionRecord(BaseModel):
@@ -12,13 +13,13 @@ class PositionRecord(BaseModel):
     entry_price: float = 0.0
     entry_date: str = ""
     entry_edge_score: float = 0.0
-    stop_loss_pct: float = Field(-0.07,gt=-1,lt=0)
+    stop_loss_pct: float = Field(-0.07, gt=-1, lt=0)
     take_profit_pct: float = 0.20
     quantity: float = 0.0
     order_id: str = ""
     reconciled: bool = False  # True = added by reconcile (not by our own fill);
-                              # skips max-holding advisories until the next full
-                              # cycle computes its vol-adjusted stop.
+    # skips max-holding advisories until the next full
+    # cycle computes its vol-adjusted stop.
     model_config = ConfigDict(allow_inf_nan=False)
     schema_version: int = 2
     position_id: str = Field(default_factory=lambda: str(uuid4()))
@@ -54,6 +55,7 @@ class PositionRecord(BaseModel):
     atr_source: str | None = None
     quote_timestamp: str | None = None
     pending_exit_order_id: str | None = None
+    sector: str = ""
     thesis: str = ""
     invalidation: list[str] = Field(default_factory=list)
     thesis_invalidated: bool = False
@@ -78,7 +80,8 @@ class PositionRecord(BaseModel):
     def known_date_valid(self):
         if self.entry_date_known:
             from datetime import datetime
-            datetime.fromisoformat(self.entry_date.replace("Z","+00:00"))
+
+            datetime.fromisoformat(self.entry_date)
         return self
 
 
@@ -100,6 +103,7 @@ class Portfolio(BaseModel):
     account_id: str = ""
     total_value: float = 0.0
     buying_power: float = 0.0
+    cash: float | None = None
     positions: list[Position] = Field(default_factory=list)
     cash_pct: float = 0.0
     reconciliation_status: str = "UNKNOWN"
@@ -107,5 +111,9 @@ class Portfolio(BaseModel):
     timestamp: str = ""
     errors: list[str] = Field(default_factory=list)
 
+    @property
+    def cash_percentage_display(self):
+        return f"{self.cash_pct:.1f}%" if self.cash is not None else "unavailable"
 
-__all__ = ["Position", "Portfolio", "PositionRecord"]
+
+__all__ = ["Portfolio", "Position", "PositionRecord"]

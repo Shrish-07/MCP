@@ -1,7 +1,9 @@
 """Auditable daily technical features; fingerprints are descriptions only."""
 
+import itertools
 import math
 import statistics as stats
+
 from core.exits.trail_manager import wilder_atr
 
 
@@ -14,12 +16,15 @@ def _mean(values):
 
 
 def rsi14(closes):
-    if len(closes)<15:return None
-    changes=[b-a for a,b in zip(closes,closes[1:])]
-    gains=[max(c,0) for c in changes];losses=[max(-c,0) for c in changes]
-    gain,loss=stats.mean(gains[:14]),stats.mean(losses[:14])
-    for g,l in zip(gains[14:],losses[14:]):gain,loss=(13*gain+g)/14,(13*loss+l)/14
-    return 100-100/(1+gain/loss) if loss>0 else (100. if gain>0 else 50.)
+    if len(closes) < 15:
+        return None
+    changes = [b - a for a, b in itertools.pairwise(closes)]
+    gains = [max(c, 0) for c in changes]
+    losses = [max(-c, 0) for c in changes]
+    gain, loss = stats.mean(gains[:14]), stats.mean(losses[:14])
+    for g, l in zip(gains[14:], losses[14:]):
+        gain, loss = (13 * gain + g) / 14, (13 * loss + l) / 14
+    return 100 - 100 / (1 + gain / loss) if loss > 0 else (100.0 if gain > 0 else 50.0)
 
 
 def technical_features(bars, cfg):
@@ -27,7 +32,7 @@ def technical_features(bars, cfg):
         raise ValueError("at least 250 valid completed bars required")
     c = [b.close for b in bars]
     v = [b.volume for b in bars]
-    returns = [b / a - 1 for a, b in zip(c, c[1:])]
+    returns = [b / a - 1 for a, b in itertools.pairwise(c)]
     avg20 = [stats.mean(c[i - 19 : i + 1]) for i in range(len(c) - 20, len(c))]
     sma = stats.mean(c[-20:])
     prior_sma = stats.mean(c[-40:-20])
@@ -45,7 +50,7 @@ def technical_features(bars, cfg):
         if down_recent and down_prior and _mean(down_prior) > 0
         else None
     )
-    rsi=rsi14(c)
+    rsi = rsi14(c)
     vol_ratio = (
         _std(returns[-10:]) / _std(returns[-30:-10])
         if _std(returns[-30:-10]) > 0

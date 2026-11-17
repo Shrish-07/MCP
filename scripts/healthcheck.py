@@ -1,17 +1,21 @@
-import json,sys
-from datetime import datetime,timezone
-from pathlib import Path
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from utils.market_calendar import is_market_open_at
+"""Read-only local process and trading-backend health check."""
 
-if __name__=="__main__":
-    try:
-        state=json.loads((Path(__file__).resolve().parents[1]/"logs/health.json").read_text())
-        if is_market_open_at():
-            stamp=state.get("monitor",{}).get("last_success")
-            healthy=bool(stamp) and (datetime.now(timezone.utc)-datetime.fromisoformat(stamp)).total_seconds()<90
-            healthy=healthy and not state.get("broker",{}).get("error") and not state.get("quotes",{}).get("error")
-        else:healthy=True
-    except (OSError,ValueError):healthy=False
-    print("healthy" if healthy else "unhealthy")
-    sys.exit(0 if healthy else 1)
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from utils.health import inspect_health
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--path",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "logs/health.json",
+    )
+    args = parser.parse_args()
+    report = inspect_health(args.path)
+    print(json.dumps(report))
+    raise SystemExit(0 if report["healthy"] else 1)

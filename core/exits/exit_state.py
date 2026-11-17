@@ -1,14 +1,21 @@
 """Durable one-time graduation and debounced advisory events."""
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 
 def queue_review(record, kind, evidence, *, cooldown_hours=24, now=None, rearm=False):
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     previous = record.review_events.get(kind)
     if previous:
-        if previous["state"] in ("DUE", "IN_PROGRESS", "APPROVED", "SUBMITTED", "PARTIALLY_FILLED", "UNKNOWN_REQUIRES_RECONCILIATION"):
+        if previous["state"] in (
+            "DUE",
+            "IN_PROGRESS",
+            "APPROVED",
+            "SUBMITTED",
+            "PARTIALLY_FILLED",
+            "UNKNOWN_REQUIRES_RECONCILIATION",
+        ):
             return False
         if not rearm or now - datetime.fromisoformat(
             previous["created_at"]
@@ -43,12 +50,16 @@ def graduate(record, price, settings):
 
 
 def finish_review(record, event_ids, decision, *, model_failed=False, now=None):
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     for event in record.review_events.values():
         if not isinstance(event, dict) or event.get("id") not in event_ids:
             continue
         event.update(
-            state="RETRY" if model_failed else "APPROVED" if decision == "SELL" else "COMPLETED",
+            state="RETRY"
+            if model_failed
+            else "APPROVED"
+            if decision == "SELL"
+            else "COMPLETED",
             decision=decision,
             finished_at=now.isoformat(),
         )

@@ -4,8 +4,9 @@ import csv
 import hashlib
 import io
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+
 from models.portfolio import PositionRecord
 from utils.persistence import atomic_json
 
@@ -26,8 +27,8 @@ def parse_universe(text, *, as_of=None):
     return {
         "source": SOURCE,
         "upstream_source": "Wikipedia S&P 500 constituents via datasets repository",
-        "as_of": as_of or datetime.now(timezone.utc).isoformat(),
-        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "as_of": as_of or datetime.now(UTC).isoformat(),
+        "retrieved_at": datetime.now(UTC).isoformat(),
         "version": hashlib.sha256(text.encode()).hexdigest(),
         "constituents": sorted(constituents, key=lambda r: r["ticker"]),
     }
@@ -36,7 +37,7 @@ def parse_universe(text, *, as_of=None):
 def load_universe(path, max_age_days=14, now=None):
     value = json.loads(Path(path).read_text(encoding="utf-8"))
     age = (
-        (now or datetime.now(timezone.utc)) - datetime.fromisoformat(value["as_of"])
+        (now or datetime.now(UTC)) - datetime.fromisoformat(value["as_of"])
     ).total_seconds() / 86400
     if (
         not 0 <= age <= max_age_days

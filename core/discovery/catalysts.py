@@ -1,19 +1,19 @@
 """Validate reported earnings catalysts from the configured broker calendar."""
 
-from datetime import date, datetime, timedelta, timezone
 import math
+from datetime import UTC, date, datetime, timedelta
 
 from models.portfolio import PositionRecord
 from utils.persistence import atomic_json
 
 
 async def refresh_catalysts(client, path, symbols, *, now=None):
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     start = now.date() - timedelta(days=7)
     payload = await client.get_earnings_calendar_window(start.isoformat(), 8)
     data = payload.get("data")
     if not isinstance(data, dict) or not isinstance(data.get("results"), list):
-        raise ValueError("earnings calendar results unavailable")
+        raise TypeError("earnings calendar results unavailable")
     if data.get("next") or data.get("next_cursor") or data.get("has_more"):
         raise ValueError("earnings calendar response incomplete")
     catalysts = {}

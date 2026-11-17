@@ -1,0 +1,15 @@
+{
+  "store": "C:\\Users\\Shris\\OneDrive\\Desktop\\Project\\S-BOT\\robinhood-agent\\journals",
+  "initial_files": 10,
+  "initial_records": 419,
+  "research_records_removed": 250,
+  "files_deleted": 1,
+  "mixed_files_rewritten": 9,
+  "protected_records_retained": 169,
+  "remaining_research_only_records": 0,
+  "all_old_journal_records_removed": false,
+  "protected_record_values_preserved": true,
+  "backup_created": false,
+  "status": "PARTIALLY VERIFIED",
+  "limitation": "Old rows containing execution or P&L data remain intact under the deletion restrictions and can still contribute historical prompt metrics."
+}

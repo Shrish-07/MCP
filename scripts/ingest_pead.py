@@ -11,7 +11,6 @@ sys.path.insert(0, str(ROOT))
 from core.exits.pead_ingestion import build_pead_snapshot
 from utils.persistence import atomic_json
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("provider_export", type=Path)

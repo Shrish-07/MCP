@@ -1,5 +1,6 @@
-from core.attribution import build_report
 from test_p0_safety import decision, result
+
+from core.attribution import build_report
 
 
 def test_attribution_partial_fills_and_unknown_costs(pm):
@@ -18,5 +19,3 @@ def test_attribution_partial_fills_and_unknown_costs(pm):
     assert r["closed_positions"][0]["net_realized_pnl"] is None
     build_report(pm)  # export is idempotent
     assert len((pm._path.parent / "exit_ledger.jsonl").read_text().splitlines()) == 3
-
-

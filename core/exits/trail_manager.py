@@ -1,12 +1,14 @@
 """Long-position stops: Wilder ATR-14, bid-based peaks and monotonic ratchets."""
 
+import itertools
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
+
 from utils.freshness import fresh_timestamp
 
 
-def completed_bars(bars, now=None, *, require_fresh=True):
+def completed_bars(bars, now=None, *, require_fresh=True, trailing_only=False):
     """Daily bars labeled by session date; require every expected session.
 
     A daily bar is completed only after its NYSE close. No current intraday bar
@@ -16,12 +18,12 @@ def completed_bars(bars, now=None, *, require_fresh=True):
 
     if _NYSE is None:
         raise ValueError("exchange calendar unavailable")
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     if not bars:
         raise ValueError("daily history missing")
     dated = []
     for bar in bars:
-        stamp = datetime.fromisoformat(bar.timestamp.replace("Z", "+00:00"))
+        stamp = datetime.fromisoformat(bar.timestamp)
         values = [bar.open, bar.high, bar.low, bar.close, bar.volume]
         if (
             not all(math.isfinite(v) for v in values)
@@ -54,7 +56,15 @@ def completed_bars(bars, now=None, *, require_fresh=True):
         d for d in expected if completed[0][0] <= d <= completed[-1][0]
     }
     if {d for d, b in completed} != expected_in_range:
-        raise ValueError("missing exchange sessions")
+        if not trailing_only:
+            raise ValueError("missing exchange sessions")
+        present = dict(completed)
+        suffix = []
+        for day in reversed([d for d in expected if d <= completed[-1][0]]):
+            if day not in present:
+                break
+            suffix.append((day, present[day]))
+        completed = list(reversed(suffix))
     return [b for d, b in completed]
 
 
@@ -63,7 +73,7 @@ def wilder_atr(bars, period=14):
         return None
     tr = [
         max(b.high - b.low, abs(b.high - a.close), abs(b.low - a.close))
-        for a, b in zip(bars, bars[1:])
+        for a, b in itertools.pairwise(bars)
     ]
     if not all(math.isfinite(v) and v >= 0 for v in tr):
         return None
@@ -74,15 +84,15 @@ def wilder_atr(bars, period=14):
 
 
 def update_trail(record, quote, settings, *, now=None):
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     if not fresh_timestamp(quote.timestamp, 60, now):
         raise ValueError("stale/malformed quote timestamp")
-    price = quote.bid if quote.bid > 0 else quote.price
+    price = executable_mark(quote)
     if not math.isfinite(price) or price <= 0:
         raise ValueError("invalid executable mark")
     if record.quote_timestamp and datetime.fromisoformat(
-        quote.timestamp.replace("Z", "+00:00")
-    ) < datetime.fromisoformat(record.quote_timestamp.replace("Z", "+00:00")):
+        quote.timestamp
+    ) < datetime.fromisoformat(record.quote_timestamp):
         raise ValueError("out-of-order quote")
     if record.exit_state == "RECONCILIATION_REQUIRED":
         raise ValueError("corporate action/position reconciliation required")
@@ -90,8 +100,8 @@ def update_trail(record, quote, settings, *, now=None):
         record.peak_price, record.peak_timestamp = price, quote.timestamp
     record.low_price = min(record.low_price, price) if record.low_price else price
     for lot in record.lots:
-        lot["peak_price"]=max(lot.get("peak_price",lot["price"]),price)
-        lot["low_price"]=min(lot.get("low_price",lot["price"]),price)
+        lot["peak_price"] = max(lot.get("peak_price", lot["price"]), price)
+        lot["low_price"] = min(lot.get("low_price", lot["price"]), price)
     record.quote_timestamp = quote.timestamp
     record.initial_stop_px = max(
         record.initial_stop_px, record.entry_price * (1 + record.stop_loss_pct)
@@ -143,3 +153,13 @@ def update_trail(record, quote, settings, *, now=None):
             else "OPEN_INITIAL_STOP"
         )
     return price <= record.effective_stop_px
+
+
+def executable_mark(quote):
+    if (
+        quote.ask > quote.bid > 0
+        and quote.price > 0
+        and (quote.ask - quote.bid) / quote.price > 0.02
+    ):
+        return quote.price
+    return quote.bid if quote.bid > 0 else quote.price

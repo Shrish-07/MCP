@@ -7,8 +7,9 @@ import math
 import os
 import statistics
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
+
 from utils.persistence import atomic_json
 
 
@@ -103,11 +104,20 @@ def build_report(pm, *, day=None, quotes=None, equity=None):
             if final["history_complete"] and final.get("initial_entry_price")
             else None,
             "mae_pct": (final["low_price"] / final["initial_entry_price"] - 1) * 100
-            if final["history_complete"] and final.get("low_price") and final.get("initial_entry_price")
+            if final["history_complete"]
+            and final.get("low_price")
+            and final.get("initial_entry_price")
             else None,
             "history_complete": final["history_complete"],
-            "lot_excursions":[{"lot_id":lot["lot_id"],"mfe_pct":(lot["peak_price"]/lot["price"]-1)*100,
-                "mae_pct":(lot["low_price"]/lot["price"]-1)*100} for lot in final.get("entry_lots",[]) if lot.get("peak_price") and lot.get("low_price")],
+            "lot_excursions": [
+                {
+                    "lot_id": lot["lot_id"],
+                    "mfe_pct": (lot["peak_price"] / lot["price"] - 1) * 100,
+                    "mae_pct": (lot["low_price"] / lot["price"] - 1) * 100,
+                }
+                for lot in final.get("entry_lots", [])
+                if lot.get("peak_price") and lot.get("low_price")
+            ],
             "exit_reason": final.get("reason"),
             "entry_archetype": evidence.get("archetype"),
             "gap_decile": evidence.get("gap_decile"),
@@ -122,12 +132,13 @@ def build_report(pm, *, day=None, quotes=None, equity=None):
                 datetime.fromisoformat(trade["closed_at"]),
             )
             if start.tzinfo is None:
-                start = start.replace(tzinfo=timezone.utc)
+                start = start.replace(tzinfo=UTC)
             if end.tzinfo is None:
-                end = end.replace(tzinfo=timezone.utc)
+                end = end.replace(tzinfo=UTC)
             trade["holding_calendar_days"] = (end - start).total_seconds() / 86400
             from core.exits.triggers import trading_sessions
-            trade["holding_trading_sessions"]=trading_sessions(start.isoformat(),end)
+
+            trade["holding_trading_sessions"] = trading_sessions(start.isoformat(), end)
         trades.append(trade)
     today_closed = [
         t
@@ -152,17 +163,26 @@ def build_report(pm, *, day=None, quotes=None, equity=None):
         if quotes and all(r.ticker in quotes for r in pm.get_open_records())
         else None
     )
-    history=state.get("equity_history",[])
-    peak=0.;drawdown=0.
+    history = state.get("equity_history", [])
+    peak = 0.0
+    drawdown = 0.0
     for mark in history:
-        peak=max(peak,mark["equity"])
-        drawdown=max(drawdown,1-mark["equity"]/peak)
-    day_fills=[e for e in fills if datetime.fromisoformat(e["timestamp"]).astimezone(ZoneInfo("America/New_York")).date().isoformat()==day]
+        peak = max(peak, mark["equity"])
+        drawdown = max(drawdown, 1 - mark["equity"] / peak)
+    day_fills = [
+        e
+        for e in fills
+        if datetime.fromisoformat(e["timestamp"])
+        .astimezone(ZoneInfo("America/New_York"))
+        .date()
+        .isoformat()
+        == day
+    ]
     report = {
         "schema_version": 2,
         "mode": pm.mode,
         "day_et": day,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "metrics": _metrics(trades),
         "closed_positions": trades,
         "today_closed_positions": today_closed,
@@ -178,10 +198,17 @@ def build_report(pm, *, day=None, quotes=None, equity=None):
         "turnover_fraction": sum(e["price"] * e["quantity"] for e in day_fills) / equity
         if equity and equity > 0
         else None,
-        "drawdown": drawdown if len(history)>=2 else None,
-        "drawdown_basis":"observed broker account equity; unadjusted for deposits/withdrawals; incomplete history",
-        "exposure_fraction":exposure/equity if exposure is not None and equity and equity>0 else None,
-        "marked_open_pnl":sum((quotes[r.ticker].price-r.entry_price)*r.quantity for r in pm.get_open_records()) if quotes and all(r.ticker in quotes for r in pm.get_open_records()) else None,
+        "drawdown": drawdown if len(history) >= 2 else None,
+        "drawdown_basis": "observed broker account equity; unadjusted for deposits/withdrawals; incomplete history",
+        "exposure_fraction": exposure / equity
+        if exposure is not None and equity and equity > 0
+        else None,
+        "marked_open_pnl": sum(
+            (quotes[r.ticker].price - r.entry_price) * r.quantity
+            for r in pm.get_open_records()
+        )
+        if quotes and all(r.ticker in quotes for r in pm.get_open_records())
+        else None,
         "benchmark_relative_performance": None,
         "data_quality": {
             "legacy_history": "incomplete unless confirmed fill and valid marks exist",

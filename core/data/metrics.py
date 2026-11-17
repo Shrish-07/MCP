@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from models.market_data import MarketMetrics, OHLCVBar
@@ -18,11 +18,17 @@ class MetricsEngine:
         self.logger = logging.getLogger("robinhood-agent.core.data.metrics")
 
     async def compute(
-        self, ticker: str, bars: list[OHLCVBar], client: Any,
+        self,
+        ticker: str,
+        bars: list[OHLCVBar],
+        client: Any,
     ) -> MarketMetrics:
         """Async — pulls RSI, MACD, Bollinger, ATR, SMA, and fundamentals
         directly from Robinhood's MCP tools, keeping only return/drawdown
         calculations as local arithmetic on the bars parameter."""
+        from core.exits.trail_manager import completed_bars
+
+        bars = completed_bars(bars, require_fresh=False) if bars else []
         if not bars:
             return MarketMetrics(ticker=ticker, window_start="", window_end="")
 
@@ -39,9 +45,12 @@ class MetricsEngine:
         return_90d = ((latest.close - base_90d) / base_90d) * 100.0 if base_90d else 0.0
 
         window = closes[-30:] if len(closes) >= 30 else closes
-        peak = max(window) if window else 0.0
-        trough = min(window) if window else 0.0
-        drawdown_30d = ((peak - trough) / peak) * 100.0 if peak > 0 else 0.0
+        peak = max_dd = 0.0
+        for price in window:
+            peak = max(peak, price)
+            if peak > 0:
+                max_dd = max(max_dd, (peak - price) / peak)
+        drawdown_30d = max_dd * 100.0
 
         # Realized volatility — still local arithmetic on bars
         returns_7d = [
@@ -58,6 +67,7 @@ class MetricsEngine:
         metrics = MarketMetrics(
             ticker=ticker,
             current_price=latest.close,
+            return_bases={"5d": base_5d, "30d": base_30d, "90d": base_90d},
             return_5d=return_5d,
             return_30d=return_30d,
             return_90d=return_90d,
@@ -69,42 +79,77 @@ class MetricsEngine:
         )
 
         # ---------- direct Robinhood extraction ----------
-        end_time = datetime.now(timezone.utc)
+        end_time = datetime.now(UTC)
         start_time_90d = (end_time - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
         end_time_str = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # RSI — direct from Robinhood
         rsi_result = await client.get_technical_indicator(
-            ticker, "rsi", "day", start_time_90d, end_time_str,
-            output="latest", period=14,
+            ticker,
+            "rsi",
+            "day",
+            start_time_90d,
+            end_time_str,
+            output="latest",
+            period=14,
         )
         metrics.rsi_14 = self._extract_latest_indicator_value(rsi_result, "rsi")
 
         # MACD histogram — direct from Robinhood
         macd_result = await client.get_technical_indicator(
-            ticker, "macd", "day", start_time_90d, end_time_str,
+            ticker,
+            "macd",
+            "day",
+            start_time_90d,
+            end_time_str,
             output="latest",
         )
         metrics.macd_histogram = self._extract_macd_histogram(macd_result)
 
         # Bollinger — direct bands, z-score is (price - middle) / sigma
         bb_result = await client.get_technical_indicator(
-            ticker, "bollinger_bands", "day", start_time_90d, end_time_str,
-            output="latest", num_std=2,
+            ticker,
+            "bollinger_bands",
+            "day",
+            start_time_90d,
+            end_time_str,
+            output="latest",
+            num_std=2,
         )
-        metrics.bb_zscore = self._extract_bollinger_zscore(bb_result, metrics.current_price)
+        points = bb_result.get("data", {}).get("indicators", [])
+        series = points[0].get("series", []) if points else []
+        if (
+            series
+            and series[-1].get("upper") is not None
+            and series[-1].get("middle") is not None
+        ):
+            metrics.bb_middle = float(series[-1]["middle"])
+            metrics.bb_sigma = (float(series[-1]["upper"]) - metrics.bb_middle) / 2
+        metrics.bb_zscore = self._extract_bollinger_zscore(
+            bb_result, metrics.current_price
+        )
 
         # ATR — direct from Robinhood
         atr_result = await client.get_technical_indicator(
-            ticker, "atr", "day", start_time_90d, end_time_str,
-            output="latest", period=7,
+            ticker,
+            "atr",
+            "day",
+            start_time_90d,
+            end_time_str,
+            output="latest",
+            period=7,
         )
         metrics.atr_7d = self._extract_latest_indicator_value(atr_result, "atr")
 
         # 20-day SMA — distance is (price - sma) / sma (unit conversion)
         sma_result = await client.get_technical_indicator(
-            ticker, "sma", "day", start_time_90d, end_time_str,
-            output="latest", period=20,
+            ticker,
+            "sma",
+            "day",
+            start_time_90d,
+            end_time_str,
+            output="latest",
+            period=20,
         )
         sma_20 = self._extract_latest_indicator_value(sma_result, "sma")
         metrics.sma_20 = sma_20  # raw value — main.py no longer has to
@@ -115,10 +160,17 @@ class MetricsEngine:
 
         # closes_above_20dma — needs the SMA series aligned with real closes
         sma_series_result = await client.get_technical_indicator(
-            ticker, "sma", "day", start_time_90d, end_time_str,
-            output="series", period=20,
+            ticker,
+            "sma",
+            "day",
+            start_time_90d,
+            end_time_str,
+            output="series",
+            period=20,
         )
-        metrics.closes_above_20dma = self._count_closes_above_series(bars, sma_series_result)
+        metrics.closes_above_20dma = self._count_closes_above_series(
+            bars, sma_series_result
+        )
 
         # Fundamentals — volume averages and new fields direct from Robinhood
         fundamentals = await client.get_equity_fundamentals([ticker])
@@ -145,22 +197,34 @@ class MetricsEngine:
         try:
             indicators = result.get("data", {}).get("indicators", [])
             if not indicators:
-                self.logger.warning("indicator_extract_no_indicators raw_data=%s", result)
+                self.logger.warning(
+                    "indicator_extract_no_indicators raw_data=%s", result
+                )
                 return 0.0
             series = indicators[0].get("series", [])
             if not series:
-                self.logger.warning("indicator_extract_empty_series raw_data=%s", result)
+                self.logger.warning(
+                    "indicator_extract_empty_series raw_data=%s", result
+                )
                 return 0.0
             latest_point = series[-1]
             value = latest_point.get("value")
             if value is None:
                 self.logger.warning(
-                    "indicator_extract_no_value key_hint=%s point=%s", key_hint, latest_point
+                    "indicator_extract_no_value key_hint=%s point=%s",
+                    key_hint,
+                    latest_point,
                 )
                 return 0.0
             return float(value)
         except Exception as exc:
-            self.logger.warning("indicator_extract_exception key_hint=%s error=%s raw_data=%s", key_hint, exc, result)
+            self.logger.exception(
+                "indicator_extract_exception key_hint=%s error=%s raw_data=%s",
+                key_hint,
+                type(exc).__name__,
+                result,
+                exc_info=False,
+            )
             return 0.0
 
     def _extract_macd_histogram(self, result: dict) -> float:
@@ -181,18 +245,27 @@ class MetricsEngine:
             self.logger.warning("macd_extract_no_match point=%s", latest_point)
             return 0.0
         except Exception as exc:
-            self.logger.warning("macd_extract_exception error=%s raw_data=%s", exc, result)
+            self.logger.exception(
+                "macd_extract_exception error=%s raw_data=%s",
+                type(exc).__name__,
+                result,
+                exc_info=False,
+            )
             return 0.0
 
     def _extract_bollinger_zscore(self, result: dict, current_price: float) -> float:
         try:
             indicators = result.get("data", {}).get("indicators", [])
             if not indicators:
-                self.logger.warning("bollinger_extract_no_indicators raw_data=%s", result)
+                self.logger.warning(
+                    "bollinger_extract_no_indicators raw_data=%s", result
+                )
                 return 0.0
             series = indicators[0].get("series", [])
             if not series:
-                self.logger.warning("bollinger_extract_empty_series raw_data=%s", result)
+                self.logger.warning(
+                    "bollinger_extract_empty_series raw_data=%s", result
+                )
                 return 0.0
             latest_point = series[-1]
             upper = latest_point.get("upper")
@@ -205,18 +278,27 @@ class MetricsEngine:
                 return 0.0
             return (current_price - float(middle)) / sigma
         except Exception as exc:
-            self.logger.warning("bollinger_extract_exception error=%s raw_data=%s", exc, result)
+            self.logger.exception(
+                "bollinger_extract_exception error=%s raw_data=%s",
+                type(exc).__name__,
+                result,
+                exc_info=False,
+            )
             return 0.0
 
     def _count_closes_above_series(self, bars: list, sma_series_result: dict) -> int:
         try:
             indicators = sma_series_result.get("data", {}).get("indicators", [])
             if not indicators:
-                self.logger.warning("sma_series_extract_no_indicators raw_data=%s", sma_series_result)
+                self.logger.warning(
+                    "sma_series_extract_no_indicators raw_data=%s", sma_series_result
+                )
                 return 0
             series = indicators[0].get("series", [])
             if not series:
-                self.logger.warning("sma_series_extract_empty raw_data=%s", sma_series_result)
+                self.logger.warning(
+                    "sma_series_extract_empty raw_data=%s", sma_series_result
+                )
                 return 0
 
             sma_by_date = {}
@@ -234,7 +316,12 @@ class MetricsEngine:
                     count += 1
             return count
         except Exception as exc:
-            self.logger.warning("sma_series_extract_exception error=%s raw_data=%s", exc, sma_series_result)
+            self.logger.exception(
+                "sma_series_extract_exception error=%s raw_data=%s",
+                type(exc).__name__,
+                sma_series_result,
+                exc_info=False,
+            )
             return 0
 
     # ------------------------------------------------------------------ #
@@ -248,4 +335,4 @@ class MetricsEngine:
             return 0.0
         mean = sum(values) / len(values)
         variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
-        return variance ** 0.5
+        return variance**0.5

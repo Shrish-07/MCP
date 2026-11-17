@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Set
 
 logger = logging.getLogger("robinhood-agent.core.weekly.ticker_selector")
 
 
 def select_universe(
-    held_tickers: Set[str],
+    held_tickers: set[str],
     scored_candidates: dict[str, float],
     universe_size: int = 10,
     max_positions: int = 12,
     min_sentiment_score: float = -1.0,
-) -> List[str]:
+) -> list[str]:
     """Select the weekly universe with absolute holding protection.
 
     Non-negotiable rules:
@@ -54,7 +53,8 @@ def select_universe(
         logger.warning(
             "holdings_exceed_universe_size held=%d universe_size=%d: keeping ALL held "
             "tickers (universe temporarily exceeds the configured size); no holding is dropped",
-            num_held, universe_size,
+            num_held,
+            universe_size,
         )
 
     # Held tickers are ranked by sentiment purely for deterministic ordering.
@@ -83,12 +83,17 @@ def select_universe(
         logger.warning(
             "selection_size_mismatch selected=%d universe_size=%d held=%d available_candidates=%d "
             "(returning the best valid list instead of raising)",
-            len(selected), universe_size, num_held, len(available_candidates),
+            len(selected),
+            universe_size,
+            num_held,
+            len(available_candidates),
         )
     else:
         logger.info(
             "Selected universe: %d held + %d new = %d total tickers",
-            num_held, len(new_tickers), len(selected),
+            num_held,
+            len(new_tickers),
+            len(selected),
         )
 
     return selected
@@ -96,10 +101,10 @@ def select_universe(
 
 def filter_candidates(
     candidates: list[str],
-    held_tickers: Set[str],
+    held_tickers: set[str],
     min_price: float = 5.0,
     min_volume: float = 1_000_000,
-) -> List[str]:
+) -> list[str]:
     """Filter candidate tickers based on basic criteria.
 
     Args:

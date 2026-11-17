@@ -2,12 +2,13 @@
 
 from datetime import datetime
 from math import inf
-from models.decisions import TradeDecision, DecisionType, ExecutionResult
-from models.market_data import EquityQuote
-from core.position.manager import PositionManager
-from core.exits.trail_manager import update_trail
-from core.exits.exit_state import graduate
+
 from core.attribution import build_report
+from core.exits.exit_state import graduate
+from core.exits.trail_manager import update_trail
+from core.position.manager import PositionManager
+from models.decisions import DecisionType, ExecutionResult, TradeDecision
+from models.market_data import EquityQuote
 
 
 def replay(

@@ -13,7 +13,7 @@ affected file(s); you should receive a response within a few days.
 place real orders against a real Robinhood brokerage account. Treat it as
 experimental research software:
 
-- Keep `trading.dry_run: true` in `config/settings.json` until you have
+- Keep `execution.dry_run: true` in `config/settings.json` until you have
   independently reviewed the code and accept the risk.
 - LLM output is non-deterministic; markets are unpredictable. Hard risk
   rules (stop-loss, max positions, sizing, safe windows) are enforced in
@@ -42,8 +42,9 @@ else.
 
 ## Secrets policy
 
-- Secrets enter the process **only** through environment variables loaded
-  from `.env` (`ANTHROPIC_API_KEY`, `FINNHUB_API_KEY`).
+- API keys enter through environment variables loaded from `.env`
+  (`ANTHROPIC_API_KEY`, `FINNHUB_API_KEY`). Robinhood OAuth credentials are
+  loaded from the private cache described in [the authentication guide](docs/AUTHENTICATION.md).
 - No secret is ever written to logs or traces; the response recorder
   redacts bearer headers, tokens, and key/value pairs before persisting,
   and masks `account_number` in trace arguments.

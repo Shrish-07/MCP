@@ -1,4 +1,5 @@
 """Cost tracker: accuracy contract (Anthropic-formula parity) + JSONL append."""
+
 from __future__ import annotations
 
 import json
@@ -12,6 +13,7 @@ def _fresh_tracker() -> CostTracker:
     # Point storage at a scratch dir via the _logs_dir hook
     import tempfile
     from pathlib import Path
+
     tmp = Path(tempfile.mkdtemp())
     t._summary_path = lambda: tmp / "cost_tracker.json"  # type: ignore
     t._records_path = lambda: tmp / "cost_records.jsonl"  # type: ignore
@@ -22,10 +24,24 @@ def _fresh_tracker() -> CostTracker:
 
 def test_exact_dashboard_formula():
     t = _fresh_tracker()
-    t.set_pricing({"claude-sonnet-5-5": {"input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0}})
+    t.set_pricing(
+        {
+            "claude-sonnet-5-5": {
+                "input": 3.0,
+                "cache_write": 3.75,
+                "cache_read": 0.3,
+                "output": 15.0,
+            }
+        }
+    )
     # The API's input=1000 is uncached; cache categories are additional.
-    usd = t.record("claude-sonnet-5-5", input_tokens=1000, output_tokens=500,
-                   cache_creation_tokens=600, cache_read_tokens=200)
+    usd = t.record(
+        "claude-sonnet-5-5",
+        input_tokens=1000,
+        output_tokens=500,
+        cache_creation_tokens=600,
+        cache_read_tokens=200,
+    )
     expected = (1000 * 3.0 + 600 * 3.75 + 200 * 0.3 + 500 * 15.0) / 1_000_000
     assert abs(usd - expected) < 1e-12
     # record file is append-only JSONL
@@ -42,7 +58,16 @@ def test_exact_dashboard_formula():
 
 def test_unknown_model_falls_back_to_star_rate():
     t = _fresh_tracker()
-    t.set_pricing({"claude-sonnet-5-5": {"input": 3.0, "cache_write": 3.75, "cache_read": 0.3, "output": 15.0}})
+    t.set_pricing(
+        {
+            "claude-sonnet-5-5": {
+                "input": 3.0,
+                "cache_write": 3.75,
+                "cache_read": 0.3,
+                "output": 15.0,
+            }
+        }
+    )
     usd = t.record("claude-mystery-future-9", input_tokens=1_000_000, output_tokens=0)
     assert usd is None  # unknown model is explicitly unpriced
 

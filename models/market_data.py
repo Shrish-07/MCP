@@ -41,6 +41,9 @@ class MarketMetrics(BaseModel):
     dividend_yield: float = 0.0
     sector: str = ""
     industry: str = ""
+    return_bases: dict[str, float] = Field(default_factory=dict)
+    bb_middle: float = 0.0
+    bb_sigma: float = 0.0
     window_start: str = ""
     window_end: str = ""
 

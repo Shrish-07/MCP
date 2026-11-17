@@ -1,0 +1,36 @@
+{
+  "primary": {
+    "model": "AnkitAI/FinSense-ModernBERT-Financial-News-Sentiment-Analysis",
+    "revision": "fa8b21b6b6549ca70263ee96b9ec52aba67cd2b4",
+    "labels": {
+      "negative": 0,
+      "neutral": 1,
+      "positive": 2
+    },
+    "score_count": 3,
+    "scores": [
+      0.9999998548047095,
+      -0.9999993798385276,
+      -1.915955692766147e-06
+    ],
+    "normalized": true,
+    "singleton_reused": true
+  },
+  "fallback": {
+    "model": "AnkitAI/distilbert-base-uncased-financial-news-sentiment-analysis",
+    "revision": "c87421d87bc24e0d78f04658e91e0b3e43eb1290",
+    "labels": {
+      "negative": 0,
+      "neutral": 1,
+      "positive": 2
+    },
+    "scores": [
+      0.9913516778033227,
+      -0.9891040278598666,
+      0.0005668742232955992
+    ],
+    "normalized": true,
+    "selected_after_primary_failure": true
+  },
+  "external_inference_calls": 0
+}

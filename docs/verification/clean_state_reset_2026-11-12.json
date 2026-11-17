@@ -1,0 +1,24 @@
+{
+  "journal_files_remaining": 0,
+  "local_positions": 0,
+  "position_schema": 2,
+  "legacy_migration": false,
+  "local_order_intents": 0,
+  "local_fills": 0,
+  "account_binding_present": true,
+  "position_level_exit_state_present": false,
+  "active_derived_context_files": 0,
+  "configuration_unchanged": true,
+  "model_versions": {
+    "torch": "2.13.0",
+    "transformers": "5.16.1",
+    "accelerate": "1.14.0",
+    "huggingface-hub": "1.29.0",
+    "safetensors": "0.8.0",
+    "tokenizers": "0.23.3"
+  },
+  "dry_run": true,
+  "live_release_approved": false,
+  "discovery_enabled": false,
+  "legacy_selection_enabled": true
+}

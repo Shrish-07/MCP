@@ -1,16 +1,16 @@
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
 
-from core.position.manager import PositionManager, StateIntegrityError
 from core.execution.engine import ExecutionEngine
+from core.position.manager import PositionManager, StateIntegrityError
 from models.decisions import (
-    TradeDecision,
     DecisionType,
     ExecutionResult,
     StructuredEdgeScore,
+    TradeDecision,
 )
 from models.portfolio import Portfolio, Position
 
@@ -28,7 +28,10 @@ def portfolio(*positions):
 def decision(side="BUY", ticker="ABC", **kwargs):
     return TradeDecision(
         ticker=ticker,
-        evidence={"feature_timestamp":datetime.now(timezone.utc).isoformat(),"sector":"Technology"},
+        evidence={
+            "feature_timestamp": datetime.now(UTC).isoformat(),
+            "sector": "Technology",
+        },
         decision=DecisionType(side),
         edge=StructuredEdgeScore(total=4.5),
         **kwargs,
@@ -120,7 +123,7 @@ def test_partial_sell_terminal_keeps_remaining(pm, terminal):
 
 def test_atomic_failure_retains_previous_file(pm, monkeypatch):
     original = pm._path.read_bytes()
-    import utils.persistence as persistence
+    from utils import persistence
 
     monkeypatch.setattr(
         persistence.os,
@@ -140,11 +143,11 @@ async def test_live_requires_reconciliation_and_duplicate_is_persisted(pm):
     client.get_equity_tradability.return_value = {"tradeable": True}
     client.place_equity_order.return_value = result("SUBMITTED", qty=0)
     eng = ExecutionEngine(client, pm, config)
-    kw = dict(
-        dry_run=False,
-        quote_timestamp=datetime.now(timezone.utc).isoformat(),
-        avg_volume_30d=1e6,
-    )
+    kw = {
+        "dry_run": False,
+        "quote_timestamp": datetime.now(UTC).isoformat(),
+        "avg_volume_30d": 1e6,
+    }
     r = await eng.execute(decision(), portfolio(), 100, **kw)
     assert r.status == "REJECTED_RECONCILIATION_REQUIRED"
     pm.reconcile_with_mcp(portfolio())
@@ -172,8 +175,8 @@ async def test_low_edge_sell_and_paper_isolation(pm):
 
 @pytest.mark.asyncio
 async def test_hard_stop_never_calls_model(pm):
-    from main import TradingAgent
     from core.position.manager import ExitSignal
+    from main import TradingAgent
 
     seed(pm)
     agent = TradingAgent.__new__(TradingAgent)

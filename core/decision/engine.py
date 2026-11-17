@@ -3,16 +3,24 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import ClassVar
 
-from models.decisions import EXIT_REVIEW_RULES, DecisionType, TradeDecision, StructuredEdgeScore, CycleType, AddThesis
+from core.discovery.evidence import GUIDANCE
+from core.position.manager import ExitSignal, PositionManager, position_snapshot
+from models.decisions import (
+    EXIT_REVIEW_RULES,
+    AddThesis,
+    CycleType,
+    DecisionType,
+    StructuredEdgeScore,
+    TradeDecision,
+)
 from models.market_data import MarketMetrics
 from models.portfolio import Portfolio, PositionRecord
 from utils.anthropic_client import AnthropicClient, strip_fences
-from utils.journal_manager import JournalManager
 from utils.earnings_calendar import EarningsCalendar
-from core.position.manager import ExitSignal, PositionManager, position_snapshot
-from core.discovery.evidence import GUIDANCE
+from utils.journal_manager import JournalManager
 
 
 class DecisionEngine:
@@ -195,13 +203,13 @@ CRITICAL NUMERICAL DISCIPLINE (unchanged, still mandatory)
 METRIC DEFINITIONS (use these exact definitions, do not infer others)
 - drawdown_30d: peak-to-trough decline within the last 30 trading days
   ONLY, always a positive magnitude. Never write this as negative.
-  When citing this value in prose, always say "30-drawdown" — never
+  When citing this value in prose, always say "drawdown_30d" — never
   attach any other day-count (e.g. "90-day drawdown") to this number,
   since no drawdown metric other than the 30-day window is computed
   or provided anywhere in this system.
-- return_share_5d / return_share_30d / return_share_90d: signed
+- return_5d / return_30d / return_90d: signed
   percentage price change over that period. These are RETURNS, not
-  drawdowns. A negative return_share_90d does not imply any
+  drawdowns. A negative return_90d does not imply any
   "90-day drawdown" field exists — it does not.
 - volume_spike_pct: percentage difference between the MOST RECENT
   SINGLE DAY's volume and avg_volume_30d. Not a comparison between
@@ -270,7 +278,7 @@ Return only valid JSON with this schema (no markdown or extra text):
 }"""
 
     # Cached system prompt block: identical across all calls → cache_control breakpoint
-    SYSTEM_PROMPT = [
+    SYSTEM_PROMPT: ClassVar[list[dict]] = [
         {
             "type": "text",
             "text": SYSTEM_PROMPT_TEXT,
@@ -278,7 +286,13 @@ Return only valid JSON with this schema (no markdown or extra text):
         }
     ]
 
-    def __init__(self, client: AnthropicClient, journal_manager: JournalManager, earnings_calendar: EarningsCalendar, settings: dict | None = None) -> None:
+    def __init__(
+        self,
+        client: AnthropicClient,
+        journal_manager: JournalManager,
+        earnings_calendar: EarningsCalendar,
+        settings: dict | None = None,
+    ) -> None:
         self.client = client
         self.journal_manager = journal_manager
         self.earnings_calendar = earnings_calendar
@@ -288,12 +302,12 @@ Return only valid JSON with this schema (no markdown or extra text):
         self._max_positions = int(trading_cfg.get("max_positions", 12))
         self.logger = logging.getLogger("robinhood-agent.core.decision.engine")
         # Build the system prompt with the live threshold + position cap interpolated
-        _prompt_text = (
-            self.SYSTEM_PROMPT_TEXT
-            .replace("{EDGE_THRESHOLD}", f"{self._edge_threshold:g}")
-            .replace("{MAX_POSITIONS}", str(self._max_positions))
-        )
-        _prompt_text += GUIDANCE+"""
+        _prompt_text = self.SYSTEM_PROMPT_TEXT.replace(
+            "{EDGE_THRESHOLD}", f"{self._edge_threshold:g}"
+        ).replace("{MAX_POSITIONS}", str(self._max_positions))
+        _prompt_text += (
+            GUIDANCE
+            + """
 The objective is positive net expectancy over multi-day to multi-week holds.
 Hold valid winners while thesis and risk controls remain intact. Profit alone,
 elapsed time alone, or a lower share price is not a sell/add rationale.
@@ -306,11 +320,13 @@ evidence, catalyst, counter-thesis, horizon, risks and explicit invalidations.
 An add requires add_thesis matching the following JSON schema; omit it for other
 actions. Never invent evidence IDs or timestamps. Requested size may be reduced
 or rejected by hard code-owned limits. A price fall alone is insufficient.
-Return portfolio_review with reasoned daily_entry_count_review, sector_review,
+Return portfolio_review: {"daily_entry_count_review": "string", "sector_review": "string", "earnings_review": "string"} with reasoned daily_entry_count_review, sector_review,
 and earnings_review strings when corresponding facts flag a soft review. The
 default soft reviews are two new entries/day, 30% sector exposure, and earnings
 window sizing. Soft reviews cannot override hard account/order/data/risk limits.
-""" + json.dumps(AddThesis.model_json_schema())
+"""
+            + json.dumps(AddThesis.model_json_schema())
+        )
         self.system_prompt = [
             {
                 "type": "text",
@@ -340,20 +356,32 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
                 legacy = 0.0
             clamped_legacy = max(0.0, min(legacy, 5.0))
             if clamped_legacy != legacy:
-                self.logger.info("edge_total_clamped ticker=%s raw=%.3f clamped=%.3f",
-                                 ticker, legacy, clamped_legacy)
-            return StructuredEdgeScore(total=clamped_legacy if math.isfinite(legacy) else 0.)
+                self.logger.info(
+                    "edge_total_clamped ticker=%s raw=%.3f clamped=%.3f",
+                    ticker,
+                    legacy,
+                    clamped_legacy,
+                )
+            return StructuredEdgeScore(
+                total=clamped_legacy if math.isfinite(legacy) else 0.0
+            )
 
         def _component(key: str, hi: float) -> float:
             try:
                 val = float(edge_obj.get(key, 0.0) or 0.0)
-                if not math.isfinite(val):val=0.
+                if not math.isfinite(val):
+                    val = 0.0
             except (TypeError, ValueError):
                 val = 0.0
             clamped = max(0.0, min(val, hi))
             if clamped != val:
-                self.logger.info("edge_component_clamped ticker=%s key=%s raw=%.3f clamped=%.3f",
-                                 ticker, key, val, clamped)
+                self.logger.info(
+                    "edge_component_clamped ticker=%s key=%s raw=%.3f clamped=%.3f",
+                    ticker,
+                    key,
+                    val,
+                    clamped,
+                )
             return clamped
 
         edge = StructuredEdgeScore(
@@ -370,11 +398,18 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
         try:
             return DecisionType(str(raw or "").strip().upper())
         except ValueError:
-            self.logger.warning("decision_parse_failed raw=%r fallback=%s", raw, default.value)
+            self.logger.warning(
+                "decision_parse_failed raw=%r fallback=%s", raw, default.value
+            )
             return default
 
     async def review_exit(
-        self, exit_signal: ExitSignal, metrics: MarketMetrics, news: list[str], portfolio: Portfolio, cycle_type: CycleType,
+        self,
+        exit_signal: ExitSignal,
+        metrics: MarketMetrics,
+        news: list[str],
+        portfolio: Portfolio,
+        cycle_type: CycleType,
         spy_context: str = "",
         position_record: PositionRecord | None = None,
         open_positions_pnl: dict[str, float] | None = None,
@@ -400,20 +435,34 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
                 position_size_pct=1.0,
                 action_type="CLOSE",
                 replaced_ticker=None,
-                edge=StructuredEdgeScore(catalyst_strength=2.0, technical_confirmation=2.0, portfolio_fit=1.0, total=5.0),
+                edge=StructuredEdgeScore(
+                    catalyst_strength=2.0,
+                    technical_confirmation=2.0,
+                    portfolio_fit=1.0,
+                    total=5.0,
+                ),
                 risk_notes="Forced exit by rule.",
                 reasoning_summary=f"Auto-exit: {exit_signal.reason}",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
             )
 
         user_prompt = self._build_user_prompt(
-            exit_signal, metrics, news, portfolio, cycle_type, spy_context,
+            exit_signal,
+            metrics,
+            news,
+            portfolio,
+            cycle_type,
+            spy_context,
             position_record=position_record,
             open_positions_pnl=open_positions_pnl,
             effective_buying_power=effective_buying_power,
         )
         if evidence:
-            user_prompt += "\nFACTUAL EVIDENCE (orientation, not recommendation):\n"+json.dumps(evidence)
+            user_prompt += f"\nDAILY NEW ENTRY COUNT: {evidence.get('daily_new_entry_count', 'unavailable')}\nSECTOR EXPOSURE FRACTION: {evidence.get('sector_exposure_pct', 'unavailable')}\n"
+            user_prompt += (
+                "\nFACTUAL EVIDENCE (orientation, not recommendation):\n"
+                + json.dumps(evidence)
+            )
         try:
             response = await self.client.complete(self.system_prompt, user_prompt)
             payload = json.loads(strip_fences(response))
@@ -422,26 +471,43 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
                 ticker=exit_signal.ticker,
                 bull_thesis=str(payload.get("bull_thesis", "")),
                 bear_thesis=str(payload.get("bear_thesis", "")),
-                failure_conditions=list(payload.get("failure_conditions", [])) if payload.get("failure_conditions") else [],
-                decision=self._parse_decision(payload.get("decision", "IGNORE"), DecisionType.IGNORE),
+                failure_conditions=list(payload.get("failure_conditions", []))
+                if payload.get("failure_conditions")
+                else [],
+                decision=self._parse_decision(
+                    payload.get("decision", "IGNORE"), DecisionType.IGNORE
+                ),
                 edge=self._parse_edge(payload, exit_signal.ticker),
                 action_type=str(payload.get("action_type", "NONE")),
                 replaced_ticker=payload.get("replaced_ticker", None),
                 rotate_from_ticker=payload.get("rotate_from_ticker", None),
                 risk_notes=str(payload.get("risk_notes", "")),
                 reasoning_summary=str(payload.get("reasoning_summary", "")),
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                cycle_type=cycle_type.value if isinstance(cycle_type, CycleType) else str(cycle_type),
-                add_thesis=payload.get("add_thesis"),evidence=evidence or {},
+                timestamp=datetime.now(UTC).isoformat(),
+                cycle_type=cycle_type.value
+                if isinstance(cycle_type, CycleType)
+                else str(cycle_type),
+                add_thesis=payload.get("add_thesis"),
+                evidence=evidence or {},
                 portfolio_review=payload.get("portfolio_review") or {},
             )
-            if trade.decision not in (DecisionType.SELL,DecisionType.HOLD,DecisionType.ADD_TO_POSITION):
-                trade.decision=DecisionType.HOLD
+            if trade.decision not in (
+                DecisionType.SELL,
+                DecisionType.HOLD,
+                DecisionType.ADD_TO_POSITION,
+            ):
+                trade.decision = DecisionType.HOLD
             return trade
         except Exception as exc:
-            self.logger.warning("exit_review_fallback ticker=%s error=%s", exit_signal.ticker, exc)
+            self.logger.exception(
+                "exit_review_fallback ticker=%s error=%s",
+                exit_signal.ticker,
+                type(exc).__name__,
+                exc_info=False,
+            )
             return TradeDecision(
                 ticker=exit_signal.ticker,
+                is_fallback=True,
                 bull_thesis="Fallback exit review.",
                 bear_thesis="Fallback exit review.",
                 failure_conditions=["Model unavailable"],
@@ -452,7 +518,7 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
                 edge=StructuredEdgeScore(),
                 risk_notes="Fallback decision due to API failure.",
                 reasoning_summary="Fallback review due to error.",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
             )
 
     async def make_decision(
@@ -474,12 +540,26 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
     ) -> TradeDecision:
         """Produce a BUY/HOLD/IGNORE/ROTATE recommendation for the requested ticker."""
         user_prompt = self._build_user_prompt_for_buy(
-            ticker, metrics, news, portfolio, current_price, effective_buying_power, existing_positions_count, cycle_type, spy_context,
-            position_record=position_record, unrealized_pnl_pct=unrealized_pnl_pct, days_held=days_held,
+            ticker,
+            metrics,
+            news,
+            portfolio,
+            current_price,
+            effective_buying_power,
+            existing_positions_count,
+            cycle_type,
+            spy_context,
+            position_record=position_record,
+            unrealized_pnl_pct=unrealized_pnl_pct,
+            days_held=days_held,
             open_positions_pnl=open_positions_pnl,
         )
         if evidence:
-            user_prompt += "\nDIVERGENCE EVIDENCE (facts; orientation, not recommendation):\n"+json.dumps(evidence)
+            user_prompt += f"\nDAILY NEW ENTRY COUNT: {evidence.get('daily_new_entry_count', 'unavailable')}\nSECTOR EXPOSURE FRACTION: {evidence.get('sector_exposure_pct', 'unavailable')}\n"
+            user_prompt += (
+                "\nDIVERGENCE EVIDENCE (facts; orientation, not recommendation):\n"
+                + json.dumps(evidence)
+            )
         try:
             response = await self.client.complete(self.system_prompt, user_prompt)
             payload = json.loads(strip_fences(response))
@@ -488,37 +568,58 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
                 ticker=ticker,
                 bull_thesis=str(payload.get("bull_thesis", "")),
                 bear_thesis=str(payload.get("bear_thesis", "")),
-                failure_conditions=list(payload.get("failure_conditions", [])) if payload.get("failure_conditions") else [],
-                decision=self._parse_decision(payload.get("decision", "IGNORE"), DecisionType.IGNORE),
+                failure_conditions=list(payload.get("failure_conditions", []))
+                if payload.get("failure_conditions")
+                else [],
+                decision=self._parse_decision(
+                    payload.get("decision", "IGNORE"), DecisionType.IGNORE
+                ),
                 edge=self._parse_edge(payload, ticker),
                 action_type=str(payload.get("action_type", "NONE")),
                 replaced_ticker=payload.get("replaced_ticker", None),
                 rotate_from_ticker=payload.get("rotate_from_ticker", None),
                 risk_notes=str(payload.get("risk_notes", "")),
                 reasoning_summary=str(payload.get("reasoning_summary", "")),
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                cycle_type=cycle_type.value if isinstance(cycle_type, CycleType) else str(cycle_type),
-                add_thesis=payload.get("add_thesis"),evidence=evidence or {},
+                timestamp=datetime.now(UTC).isoformat(),
+                cycle_type=cycle_type.value
+                if isinstance(cycle_type, CycleType)
+                else str(cycle_type),
+                add_thesis=payload.get("add_thesis"),
+                evidence=evidence or {},
                 portfolio_review=payload.get("portfolio_review") or {},
             )
 
             # Enforce max open positions (decision-level safety hint; the
             # ExecutionEngine re-enforces with fresh state). ROTATE is
             # count-neutral (one out, one in) so it survives a full book.
-            if decision.decision == DecisionType.BUY and existing_positions_count >= self._max_positions:
+            if (
+                decision.decision == DecisionType.BUY
+                and existing_positions_count >= self._max_positions
+            ):
                 decision.decision = DecisionType.IGNORE
-                decision.reasoning_summary = (decision.reasoning_summary or "") + \
-                    f" | Overridden: at max_positions={self._max_positions}. Use ROTATE to swap."
+                decision.reasoning_summary = (
+                    (decision.reasoning_summary or "")
+                    + f" | Overridden: at max_positions={self._max_positions}. Use ROTATE to swap."
+                )
 
             self.logger.info(
                 "DECISION_FINAL ticker=%s final_decision=%s edge_total=%.4f cycle=%s",
-                ticker, decision.decision.value, decision.edge.total, cycle_type
+                ticker,
+                decision.decision.value,
+                decision.edge.total,
+                cycle_type,
             )
             return decision
         except Exception as exc:
-            self.logger.warning("decision_fallback ticker=%s error=%s", ticker, exc)
+            self.logger.exception(
+                "decision_fallback ticker=%s error=%s",
+                ticker,
+                type(exc).__name__,
+                exc_info=False,
+            )
             return TradeDecision(
                 ticker=ticker,
+                is_fallback=True,
                 bull_thesis="Fallback decision due to API failure.",
                 bear_thesis="Fallback decision due to API failure.",
                 failure_conditions=["Model unavailable"],
@@ -529,7 +630,7 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
                 edge=StructuredEdgeScore(),
                 risk_notes="Fallback due to API failure.",
                 reasoning_summary="Fallback due to API failure.",
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=datetime.now(UTC).isoformat(),
             )
 
     @staticmethod
@@ -539,29 +640,50 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
         return strip_fences(text)
 
     def _build_user_prompt(
-        self, exit_signal: ExitSignal, metrics: MarketMetrics, news: list[str], portfolio: Portfolio, cycle_type: CycleType, spy_context: str = "",
+        self,
+        exit_signal: ExitSignal,
+        metrics: MarketMetrics,
+        news: list[str],
+        portfolio: Portfolio,
+        cycle_type: CycleType,
+        spy_context: str = "",
         position_record: PositionRecord | None = None,
         open_positions_pnl: dict[str, float] | None = None,
         effective_buying_power: float | None = None,
     ) -> str:
         journal_block = ""
         try:
-            journal_block = self.journal_manager.summarise_for_prompt(exit_signal.ticker, n=15)
-        except Exception:
+            journal_block = self.journal_manager.summarise_for_prompt(
+                exit_signal.ticker, n=15
+            )
+        except Exception as error:
+            logging.getLogger(__name__).exception(
+                "Handled failure type=%s", type(error).__name__, exc_info=False
+            )
             journal_block = ""
 
         earnings_note = ""
         try:
-            earnings_note = self.earnings_calendar.earnings_window_for_prompt(exit_signal.ticker)
-        except Exception:
+            earnings_note = self.earnings_calendar.earnings_window_for_prompt(
+                exit_signal.ticker
+            )
+        except Exception as error:
+            logging.getLogger(__name__).exception(
+                "Handled failure type=%s", type(error).__name__, exc_info=False
+            )
             earnings_note = ""
 
         # One-line POSITION snapshot when we have an open record + current price
         pos_block = ""
         if position_record is not None and exit_signal.current_price > 0:
             try:
-                pos_block = position_snapshot(position_record, exit_signal.current_price) + "\n"
-            except Exception:
+                pos_block = (
+                    position_snapshot(position_record, exit_signal.current_price) + "\n"
+                )
+            except Exception as error:
+                logging.getLogger(__name__).exception(
+                    "Handled failure type=%s", type(error).__name__, exc_info=False
+                )
                 pos_block = ""
 
         reason_line = exit_signal.reason
@@ -575,10 +697,14 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
         # is the single source of truth for what's actually held).
         pnl_map = open_positions_pnl or {}
         roster_line = PositionManager.other_positions_line(pnl_map, exit_signal.ticker)
-        bp = effective_buying_power if effective_buying_power is not None else portfolio.buying_power
+        bp = (
+            effective_buying_power
+            if effective_buying_power is not None
+            else portfolio.buying_power
+        )
         account_line = (
             f"ACCOUNT: total_value={portfolio.total_value:.2f} buying_power={bp:.2f} "
-            f"cash_pct={portfolio.cash_pct:.1f}%\n{roster_line}\n"
+            f"cash_pct={portfolio.cash_percentage_display}\n{roster_line}\n"
         )
 
         return (
@@ -593,7 +719,8 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
             f"NEWS HEADLINES:\n{json.dumps(news, indent=2)}\n\n"
             f"MARKET METRICS:\n{json.dumps(metrics.model_dump(mode='json'), indent=2)}\n\n"
             f"{account_line}\n"
-            + EXIT_REVIEW_RULES + "\n"
+            + EXIT_REVIEW_RULES
+            + "\n"
             + "Decide HOLD, SELL, or a defended ADD_TO_POSITION with the required add_thesis schema.\n"
         )
 
@@ -616,13 +743,19 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
         journal_block = ""
         try:
             journal_block = self.journal_manager.summarise_for_prompt(ticker, n=15)
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).exception(
+                "Handled failure type=%s", type(error).__name__, exc_info=False
+            )
             journal_block = ""
 
         earnings_note = ""
         try:
             earnings_note = self.earnings_calendar.earnings_window_for_prompt(ticker)
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).exception(
+                "Handled failure type=%s", type(error).__name__, exc_info=False
+            )
             earnings_note = ""
 
         # One-line POSITION snapshot when reviewing an open position + current price
@@ -630,7 +763,10 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
         if position_record is not None and current_price > 0:
             try:
                 pos_block = position_snapshot(position_record, current_price) + "\n"
-            except Exception:
+            except Exception as error:
+                logging.getLogger(__name__).exception(
+                    "Handled failure type=%s", type(error).__name__, exc_info=False
+                )
                 pos_block = ""
 
         # Single source of truth for "what else is held": positions.json via
@@ -639,7 +775,9 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
         # every other open name gets ticker + live P&L only.
         pnl_map = open_positions_pnl or {}
         roster_line = PositionManager.other_positions_line(pnl_map, ticker)
-        weakest_ticker = min(pnl_map, key=pnl_map.get, default=None) if pnl_map else None
+        weakest_ticker = (
+            min(pnl_map, key=pnl_map.get, default=None) if pnl_map else None
+        )
 
         return (
             (spy_context + "\n" if spy_context else "")
@@ -671,6 +809,10 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
                 if position_record is not None
                 else "EXISTING POSITION: None\n"
             )
-            + (f"WEAKEST CURRENT POSITION: {weakest_ticker} unrealized_pnl_pct={pnl_map[weakest_ticker]:.2f}%\n" if weakest_ticker else "WEAKEST CURRENT POSITION: None\n")
+            + (
+                f"WEAKEST CURRENT POSITION: {weakest_ticker} unrealized_pnl_pct={pnl_map[weakest_ticker]:.2f}%\n"
+                if weakest_ticker
+                else "WEAKEST CURRENT POSITION: None\n"
+            )
             + "Decide whether to BUY, HOLD, IGNORE, or ROTATE."
         )

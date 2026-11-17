@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from enum import Enum
 from uuid import uuid4
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class DecisionType(str, Enum):
@@ -46,7 +47,7 @@ class StructuredEdgeScore(BaseModel):
     Claude outputs all three. Code computes total. No faking.
     """
 
-    model_config=ConfigDict(allow_inf_nan=False)
+    model_config = ConfigDict(allow_inf_nan=False)
     catalyst_strength: float = Field(
         0.0,
         ge=0.0,
@@ -76,7 +77,7 @@ class StructuredEdgeScore(BaseModel):
     )
     total: float = 0.0
 
-    def compute_total(self) -> "StructuredEdgeScore":
+    def compute_total(self) -> StructuredEdgeScore:
         """Call after Claude fills the three components. Sets total in code."""
         self.total = round(
             min(self.catalyst_strength, 2.0)
@@ -112,7 +113,7 @@ class JournalEntry(BaseModel):
 
 
 class AddThesis(BaseModel):
-    model_config=ConfigDict(extra="forbid",strict=True,allow_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
     existing_position_confirmed: bool
     thesis_still_valid: bool
     validity_evidence: str = Field(min_length=20)
@@ -123,29 +124,35 @@ class AddThesis(BaseModel):
     incremental_invalidation: list[str] = Field(min_length=1)
     mispricing_catalyst: str = Field(min_length=20)
     why_market_may_be_wrong: str = Field(min_length=20)
-    horizon_trading_sessions: int = Field(ge=2,le=60)
+    horizon_trading_sessions: int = Field(ge=2, le=60)
     base_return_pct: float
     upside_return_pct: float
     downside_return_pct: float
     risks_and_events: list[str] = Field(min_length=1)
     not_averaging_down_reason: str = Field(min_length=20)
-    requested_increment_pct: float = Field(gt=0,le=1)
+    requested_increment_pct: float = Field(gt=0, le=1)
     incremental_risk_dollars: float = Field(ge=0)
     aggregate_risk_dollars: float = Field(ge=0)
-    alternatives: dict[str,str]
+    alternatives: dict[str, str]
     evidence_ids: list[str] = Field(min_length=1)
-    data_timestamps: dict[str,str]
+    data_timestamps: dict[str, str]
 
     @model_validator(mode="after")
     def coherent(self):
-        if set(self.alternatives)!={"HOLD","SELL","ROTATE"} or any(len(v.strip())<10 for v in self.alternatives.values()):
+        if set(self.alternatives) != {"HOLD", "SELL", "ROTATE"} or any(
+            len(v.strip()) < 10 for v in self.alternatives.values()
+        ):
             raise ValueError("HOLD/SELL/ROTATE comparisons required")
-        if not self.downside_return_pct < self.base_return_pct < self.upside_return_pct or self.downside_return_pct>=0:
+        if (
+            not self.downside_return_pct < self.base_return_pct < self.upside_return_pct
+            or self.downside_return_pct >= 0
+        ):
             raise ValueError("contradictory return scenarios")
         return self
 
 
 class TradeDecision(BaseModel):
+    is_fallback: bool = False
     decision_id: str = Field(default_factory=lambda: str(uuid4()))
     ticker: str = Field(..., min_length=1)
     bull_thesis: str = ""
@@ -163,7 +170,7 @@ class TradeDecision(BaseModel):
     cycle_type: str = ""
     evidence: dict = Field(default_factory=dict)
     add_thesis: AddThesis | None = None
-    portfolio_review: dict[str,str] = Field(default_factory=dict)
+    portfolio_review: dict[str, str] = Field(default_factory=dict)
 
     @property
     def edge_score(self) -> float:
@@ -200,11 +207,11 @@ class ExitDecision(BaseModel):
 
 
 __all__ = [
-    "DecisionType",
     "CycleType",
-    "StructuredEdgeScore",
-    "JournalEntry",
-    "TradeDecision",
+    "DecisionType",
     "ExecutionResult",
     "ExitDecision",
+    "JournalEntry",
+    "StructuredEdgeScore",
+    "TradeDecision",
 ]

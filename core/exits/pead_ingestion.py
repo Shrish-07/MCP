@@ -1,7 +1,7 @@
 """Build PEAD observations from timestamped earnings and adjusted-close exports."""
 
-from datetime import datetime, timedelta, timezone
 import math
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from models.portfolio import PositionRecord
@@ -12,11 +12,11 @@ def _instant(value):
     stamp = datetime.fromisoformat(value)
     if not stamp.tzinfo:
         raise ValueError("timestamps must include a timezone")
-    return stamp.astimezone(timezone.utc)
+    return stamp.astimezone(UTC)
 
 
 def build_pead_snapshot(payload, *, now=None):
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     cutoff = _instant(payload["data_cutoff"])
     if cutoff > now or _NYSE is None:
         raise ValueError("unusable cutoff or exchange calendar")

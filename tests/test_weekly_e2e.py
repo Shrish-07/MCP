@@ -22,8 +22,20 @@ from models.portfolio import PositionRecord
 def base_config() -> dict:
     return {
         "trading": {"max_positions": 12},
-        "watchlist": {"default_tickers": ["JPM", "NVDA", "AVGO", "CAT", "MU",
-                                          "TSM", "UNH", "XOM", "AMD", "COST"]},
+        "watchlist": {
+            "default_tickers": [
+                "JPM",
+                "NVDA",
+                "AVGO",
+                "CAT",
+                "MU",
+                "TSM",
+                "UNH",
+                "XOM",
+                "AMD",
+                "COST",
+            ]
+        },
         "sentiment_selection": {
             "enabled": True,
             "universe_size": 10,
@@ -38,6 +50,7 @@ def base_config() -> dict:
 def _make_selector(config: dict, tmp_path) -> WeeklySelector:
     """Build a WeeklySelector pointed at temp paths without loading the model."""
     import logging
+
     selector = WeeklySelector.__new__(WeeklySelector)
     selector.config = config
     selector.logger = logging.getLogger("test.weekly_selector")
@@ -82,6 +95,7 @@ async def test_e2e_fresh_selection_no_holdings(base_config, tmp_path):
 
     async def fake_scores(tickers):
         return _fake_scores(tickers)
+
     selector.fetch_news_and_scores = fake_scores
 
     selected = await selector.run_selection()
@@ -106,6 +120,7 @@ async def test_e2e_three_holdings_protected(base_config, tmp_path):
         for h in held:
             scores[h] = -0.9  # terrible sentiment, still protected
         return scores
+
     selector.fetch_news_and_scores = fake_scores
 
     selected = await selector.run_selection()
@@ -131,6 +146,7 @@ async def test_e2e_replacement_after_selling(base_config, tmp_path):
         scores = _fake_scores(tickers)
         scores["HELD1"] = -0.9
         return scores
+
     selector.fetch_news_and_scores = fake_scores
 
     selected_run1 = await selector.run_selection()
@@ -151,13 +167,16 @@ async def test_e2e_finnhub_failure_keeps_previous(base_config, tmp_path):
     previous = [f"PREV{i}" for i in range(10)]
     selector.selected_universe = previous
     selector.selected_universe_path.write_text(
-        json.dumps({"tickers": previous, "scores": {}, "timestamp": "2026-08-24T00:00:00"}),
+        json.dumps(
+            {"tickers": previous, "scores": {}, "timestamp": "2026-08-24T00:00:00"}
+        ),
         encoding="utf-8",
     )
     selector.position_manager = _stub_holdings([])
 
     async def failing_fetch(tickers):
         raise ConnectionError("finnhub down")
+
     selector.fetch_news_and_scores = failing_fetch
 
     selected = await selector.run_selection()
@@ -175,6 +194,7 @@ async def test_e2e_all_held_equals_universe(base_config, tmp_path):
 
     async def fake_scores(tickers):
         return {t: 0.0 for t in tickers}
+
     selector.fetch_news_and_scores = fake_scores
 
     selected = await selector.run_selection()
@@ -193,6 +213,7 @@ async def test_e2e_holdings_exceeding_universe_size(base_config, tmp_path):
 
     async def fake_scores(tickers):
         return _fake_scores(tickers)
+
     selector.fetch_news_and_scores = fake_scores
 
     selected = await selector.run_selection()
@@ -210,7 +231,9 @@ async def test_e2e_mean_aggregation(base_config, tmp_path):
     from models.news import NewsItem
 
     def _item(headline: str) -> NewsItem:
-        return NewsItem(id=1, headline=headline, source="test", datetime=0, related="AAA")
+        return NewsItem(
+            id=1, headline=headline, source="test", datetime=0, related="AAA"
+        )
 
     selector.news_fetcher.fetch_news_for_universe = AsyncMock(
         return_value={
@@ -250,4 +273,5 @@ async def test_e2e_empty_news_neutral_scores(base_config, tmp_path):
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(pytest.main([__file__, "-v"]))

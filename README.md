@@ -6,9 +6,46 @@ theses. Local sentiment and discovery are optional. A 15-second poll enforces
 exits; it is not an entry-generation schedule.
 
 **Shipping settings: dry run, live release unapproved, discovery disabled.**
-The upgrade has not been activated against a live account. See the evidence and
-remaining release gates in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
-The previous README is retained in `docs/history/README_pre_swing_upgrade.md`.
+Authentication and account verification are described in
+[docs/AUTHENTICATION.md](docs/AUTHENTICATION.md). The full system walkthrough is in
+[docs/END_TO_END.md](docs/END_TO_END.md).
+The latest offline engineering fixes and verification are in
+[docs/MASTER_REMEDIATION.md](docs/MASTER_REMEDIATION.md).
+The November 16 operating procedure and standalone wiring audit are in
+verification results are in [docs/MONDAY_READINESS.md](docs/MONDAY_READINESS.md).
+Earlier evidence remains in
+[docs/PRODUCTION_READINESS_AUDIT.md](docs/PRODUCTION_READINESS_AUDIT.md).
+The authorized reset removed all remaining journal context and four legacy local
+positions. The current schema-2 book is empty and bound to the verified account.
+Both configured sentiment models load locally, and the complete guarded test
+suite passes. Live orders remain disabled. The current phase covers local
+operation only.
+
+## Start locally when ready
+
+From the repository root, use the existing project environment.
+
+```powershell
+& .\.venv-upgrade\Scripts\python.exe -B scripts/preflight.py
+& .\.venv-upgrade\Scripts\python.exe main.py
+```
+
+The second command starts the actual scheduler, restores and reconciles state,
+starts process health/heartbeat tracking, and may run a catch-up cycle. Normal
+research and decision jobs use configured news and Claude services. This command
+was not executed during the reset task. Dry run remains true, live release
+approval remains false, and discovery remains disabled.
+
+In another terminal, inspect actual process health with the following command.
+
+```powershell
+& .\.venv-upgrade\Scripts\python.exe -B scripts/healthcheck.py
+```
+
+An absent process reports PROCESS_ABSENT. A live process requires a matching PID
+creation time, fresh heartbeat, successful broker reconciliation and applicable
+monitor checks. A health file alone cannot establish health. Ctrl+C or SIGTERM
+initiates cleanup and releases the instance lock when the process exits.
 
 ## Setup and offline verification
 
@@ -17,7 +54,7 @@ UTF-8 and pinned; optional ML dependencies are separate.
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt -r requirements-ml.txt
 .\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe scripts/verify_weekly_layer.py
@@ -44,6 +81,14 @@ records commit in one atomic replacement. Legacy list files are read safely and
 backed up on migration. Corruption blocks orders; it never silently becomes a
 verified empty portfolio. Archived files describe historical runs, not today's
 account.
+
+The current local book has zero positions and no unresolved local intents. Its
+account binding was initialized only after the owner-authorized read-only
+account check. Canonical order/fill records remain protected. Reset metadata
+prevents retained pre-reset fills from rebuilding old journal prompt context.
+Static constituent and candidate inputs, and intentional configured watchlists,
+remain unchanged. Derived selection, feature, sentiment and performance memory
+has been cleared.
 
 A complete successful empty broker response clears stale live holdings. Failed,
 malformed or incomplete responses preserve last-known state as unverified. Both
@@ -151,6 +196,10 @@ application logger and persistent health state. A deployment must arrange an
 independent alert destination/watchdog; an in-process monitor cannot notify anyone
 after its entire host is down.
 
+Diagnostic files rotate at 10 MiB with five backups. Diagnostic trade events use
+`logs/trade_events.jsonl`, leaving `logs/trades.json` for execution results.
+An unhealthy Docker status alone does not restart a running container.
+
 Create `data/STOP_TRADING` to refuse new live order submissions. Removing it
 restores eligibility only after normal gates pass. The monitor continues
 observing state and reporting errors. The stop file blocks all new orders,
@@ -161,10 +210,12 @@ operator. It does not cancel already submitted broker orders.
 worker only. Multiple replicas require transactional shared storage and scheduler
 leadership; shared JSON alone is insufficient.
 
-`Dockerfile` and `compose.yaml` package the same one-process backend with durable
-config/data/log/journal mounts and a health check. Supply a valid preauthenticated
-OAuth cache as a secret-mounted file; the image excludes credentials and historical
-account logs. Docker build/start was not available in the implementation host.
+`Dockerfile` and `compose.yaml` package the one-process backend with persistent
+config/data/log/journal mounts and a health check. Compose stores OAuth credentials
+at `/app/oauth/token.json` in its separate `oauth-cache` volume. The local login
+file is excluded from the image and must be explicitly provisioned for Docker.
+Both the file and its parent directory need write access for token rotation.
+See the authentication guide for callback and persistence requirements.
 
 ## Reports and evaluation
 
@@ -177,9 +228,8 @@ Observed account drawdown is labeled as unadjusted for deposits/withdrawals.
 
 API costs retain raw disjoint input/cache/output usage, actual returned model,
 request ID and pricing version/rates. Unknown rates and billable categories are
-unpriced; cost never changes trading behavior. Current official references are
-recorded in `docs/UPGRADE_LOG.md`. Historical incorrect totals are retained
-separately from version-2 records.
+unpriced; cost never changes trading behavior. Historical incorrect totals are
+retained separately from version-2 records.
 
 ```powershell
 python scripts/reconcile_costs.py dashboard.json --start 2026-11-01T00:00:00+00:00 --end 2026-11-02T00:00:00+00:00

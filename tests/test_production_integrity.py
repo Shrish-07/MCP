@@ -3,12 +3,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from test_backend_safety import build
+from test_p0_safety import decision, portfolio, result
 
 from core.position.manager import PositionManager
 from main import TradingAgent
 from models.portfolio import Position
-from test_backend_safety import build
-from test_p0_safety import decision, portfolio, result
 
 
 @pytest.mark.asyncio
@@ -70,7 +70,11 @@ async def test_decision_cycles_do_not_overlap():
         entered.set()
         await finish.wait()
 
-    agent = SimpleNamespace(logger=Mock(), _run_cycle=AsyncMock(side_effect=slow_cycle))
+    agent = SimpleNamespace(
+        logger=Mock(),
+        backend=SimpleNamespace(health=Mock()),
+        _run_cycle=AsyncMock(side_effect=slow_cycle),
+    )
     running = asyncio.create_task(TradingAgent.run_cycle(agent, "OPEN"))
     await entered.wait()
     await TradingAgent.run_cycle(agent, "MID")

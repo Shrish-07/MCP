@@ -1,0 +1,53 @@
+{
+  "date": "2026-11-12",
+  "python": "3.13.6",
+  "pytest": {
+    "exit": 0,
+    "passed": 169,
+    "failed": 0,
+    "deselected": 2,
+    "warnings": 1,
+    "seconds": 7.18
+  },
+  "active_ruff": {
+    "exit": 1,
+    "findings": 390
+  },
+  "active_pyflakes": {
+    "exit": 0
+  },
+  "compileall": {
+    "exit": 0,
+    "cache_prefix": ".test-tmp/audit-pycache"
+  },
+  "pip_check": {
+    "exit": 0
+  },
+  "preflight_isolated": {
+    "exit": 0,
+    "configuration_errors": [],
+    "state_load_error": null
+  },
+  "healthcheck": {
+    "exit": 1,
+    "health_file_present": false
+  },
+  "compose_static_yaml": {
+    "exit": 0,
+    "dotenv_read": false
+  },
+  "docker_runtime": "unavailable",
+  "model_dependencies_present": false,
+  "primary_model_cached_files": true,
+  "fallback_model_cached_files": false,
+  "real_model_load_attempted": false,
+  "dashboard_export_found": false,
+  "protected_runtime_files_checked": 18,
+  "protected_runtime_files_changed": 0,
+  "source_corrections": [
+    "core/position/manager.py",
+    "utils/logger.py"
+  ],
+  "new_regression_tests": 5,
+  "tests_mode": "offline guarded; real broker orders and provider calls prohibited"
+}

@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 
 from models.news import NewsItem
-from utils.rate_limit import RateLimiter as RateLimiter,finnhub_limiter
+from utils.rate_limit import RateLimiter, finnhub_limiter
 
 logger = logging.getLogger("robinhood-agent.core.weekly.news")
 
@@ -45,7 +45,11 @@ class WeeklyNewsFetcher:
                 with open(self._cache_file, "r", encoding="utf-8") as f:
                     return json.load(f)
             except Exception as exc:
-                self.logger.warning("weekly_news_cache_load_failed: %s", exc)
+                self.logger.exception(
+                    "weekly_news_cache_load_failed: %s",
+                    type(exc).__name__,
+                    exc_info=False,
+                )
         return {}
 
     def _save_cache(self) -> None:
@@ -54,7 +58,9 @@ class WeeklyNewsFetcher:
             with open(self._cache_file, "w", encoding="utf-8") as f:
                 json.dump(self._cache, f, indent=2)
         except Exception as exc:
-            self.logger.warning("weekly_news_cache_save_failed: %s", exc)
+            self.logger.exception(
+                "weekly_news_cache_save_failed: %s", type(exc).__name__, exc_info=False
+            )
 
     def _is_cache_fresh(self, cached_entry: dict, max_age_hours: int = 24) -> bool:
         """Check whether a cache entry is still fresh."""
@@ -62,7 +68,10 @@ class WeeklyNewsFetcher:
             cached_at = datetime.fromisoformat(cached_entry.get("cached_at", ""))
             age_hours = (datetime.now() - cached_at).total_seconds() / 3600
             return age_hours < max_age_hours
-        except Exception:
+        except Exception as error:
+            logging.getLogger(__name__).exception(
+                "Handled failure type=%s", type(error).__name__, exc_info=False
+            )
             return False
 
     async def fetch_company_news(
@@ -78,7 +87,8 @@ class WeeklyNewsFetcher:
         treat the ticker as neutral (score 0.0).
         """
         if not self._api_key:
-            if strict:raise RuntimeError("Finnhub credentials unavailable")
+            if strict:
+                raise RuntimeError("Finnhub credentials unavailable")
             self.logger.warning("weekly_news no FINNHUB_API_KEY set, returning empty")
             return []
 
@@ -103,38 +113,53 @@ class WeeklyNewsFetcher:
                 async with httpx.AsyncClient() as client:
                     response = await client.get(url, timeout=30.0)
                     if response.status_code == 429:
-                        backoff = (2 ** attempt) + random.uniform(0, 1)
+                        backoff = (2**attempt) + random.uniform(0, 1)
                         self.logger.warning(
                             "weekly_news rate_limited symbol=%s attempt=%d backoff=%.1fs",
-                            symbol, attempt, backoff,
+                            symbol,
+                            attempt,
+                            backoff,
                         )
                         await asyncio.sleep(backoff)
                         continue
                     response.raise_for_status()
                     data = response.json()
-                    if strict and not isinstance(data,list):raise ValueError("invalid news response")
+                    if strict and not isinstance(data, list):
+                        raise ValueError("invalid news response")
                     items = self._parse_items(symbol, data)
-                    if strict and len(items)!=len(data):raise ValueError("partially malformed news response")
+                    if strict and len(items) != len(data):
+                        raise ValueError("partially malformed news response")
                     self._cache[cache_key] = {
                         "cached_at": datetime.now().isoformat(),
                         "items": [item.model_dump(mode="json") for item in items],
                     }
                     self._save_cache()
-                    self.logger.info("weekly_news_fetched symbol=%s count=%d", symbol, len(items))
+                    self.logger.info(
+                        "weekly_news_fetched symbol=%s count=%d", symbol, len(items)
+                    )
                     return items
             except httpx.HTTPStatusError as exc:
                 self.logger.warning(
-                    "weekly_news_http_error symbol=%s status=%s", symbol, exc.response.status_code
+                    "weekly_news_http_error symbol=%s status=%s",
+                    symbol,
+                    exc.response.status_code,
                 )
-                await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
+                await asyncio.sleep((2**attempt) + random.uniform(0, 1))
             except Exception as exc:
-                self.logger.warning(
-                    "weekly_news_error symbol=%s attempt=%d error=%s", symbol, attempt, exc
+                self.logger.exception(
+                    "weekly_news_error symbol=%s attempt=%d error=%s",
+                    symbol,
+                    attempt,
+                    type(exc).__name__,
+                    exc_info=False,
                 )
-                await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
+                await asyncio.sleep((2**attempt) + random.uniform(0, 1))
 
-        self.logger.error("weekly_news_failed symbol=%s after %d attempts", symbol, self.max_retries)
-        if strict:raise RuntimeError(f"news fetch failed for {symbol}")
+        self.logger.error(
+            "weekly_news_failed symbol=%s after %d attempts", symbol, self.max_retries
+        )
+        if strict:
+            raise RuntimeError(f"news fetch failed for {symbol}")
         return []
 
     def _parse_items(self, symbol: str, data: list) -> list[NewsItem]:
@@ -155,7 +180,12 @@ class WeeklyNewsFetcher:
                     )
                 )
             except Exception as exc:
-                self.logger.warning("weekly_news_parse_failed symbol=%s error=%s", symbol, exc)
+                self.logger.exception(
+                    "weekly_news_parse_failed symbol=%s error=%s",
+                    symbol,
+                    type(exc).__name__,
+                    exc_info=False,
+                )
                 continue
         return news_items
 
@@ -176,7 +206,9 @@ class WeeklyNewsFetcher:
         news_dict: dict[str, list[NewsItem]] = {}
         for symbol, result in zip(symbols, results):
             if isinstance(result, Exception):
-                self.logger.error("weekly_news universe fetch failed symbol=%s: %s", symbol, result)
+                self.logger.error(
+                    "weekly_news universe fetch failed symbol=%s: %s", symbol, result
+                )
                 news_dict[symbol] = []
             else:
                 _, news = result
@@ -186,7 +218,12 @@ class WeeklyNewsFetcher:
         return news_dict
 
 
-async def fetch_weekly_news(symbols: list[str], lookback_days: int = 7) -> dict[str, list[NewsItem]]:
+async def fetch_weekly_news(
+    symbols: list[str], lookback_days: int = 7
+) -> dict[str, list[NewsItem]]:
     """Convenience function: fetch weekly news for multiple symbols."""
     fetcher = WeeklyNewsFetcher(lookback_days=lookback_days)
     return await fetcher.fetch_news_for_universe(symbols)
+
+
+__all__ = ["RateLimiter", "WeeklyNewsFetcher"]

@@ -9,11 +9,13 @@ data/seen_headlines.json
 data/earnings_calendar.json
 data/selected_universe.json
 data/weekly_news_cache.json
+data/*.json.bak
 
 # ---- local tool state ----
 .claude/settings.local.json
 .vscode/
 .idea/
+*.zip
 
 # ---- python ----
 __pycache__/

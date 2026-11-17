@@ -11,7 +11,7 @@ Thanks for your interest in contributing! This is autonomous trading software, s
    - `data/seen_headlines.json`, `data/earnings_calendar.json`, `data/selected_universe.json`, `data/weekly_news_cache.json`
 2. **`.env` is for secrets only** — the two API keys (`ANTHROPIC_API_KEY`, `FINNHUB_API_KEY`). If you need a new secret, read it via `os.getenv(...)` and add a placeholder line to `.env.example`.
 3. **Every toggle lives in `config/settings.json`.** Do not introduce environment-variable switches for behaviour; the JSON config is the single source of truth.
-4. **Dry-run stays the default.** `trading.dry_run` must remain `true` in the shipped `config/settings.json`. Never change it in a PR.
+4. **Dry-run stays the default.** `execution.dry_run` must remain `true` in the shipped `config/settings.json`. Never change it in a PR.
 5. **Pull requests require approval from the repository owner** (see `.github/CODEOWNERS`) and must pass CI, which includes a secret scan (gitleaks) that will block a PR containing tokens, keys, or files from `logs/`/`journals/`.
 
 ## Development setup
@@ -28,7 +28,7 @@ pip install -r requirements-dev.txt
 copy .env.example .env         # fill in your two API keys
 ```
 
-Run everything in **dry-run** (`trading.dry_run: true` is the shipped default) while developing.
+Run everything in **dry-run** (`execution.dry_run: true` is the shipped default) while developing.
 
 ## Running the tests
 
@@ -38,12 +38,12 @@ pytest -m heavy                           # includes the ModernBERT model tests 
 python scripts/verify_weekly_layer.py     # offline-deterministic weekly-selection harness
 ```
 
-CI runs the light suite and the verification harness on every PR (Python 3.11 + 3.13, Linux).
+CI runs the light suite and the verification harness on every PR (Python 3.13, Linux).
 
 ## Pull request checklist
 
 - [ ] No secrets, no `logs/` or `journals/` files, no OAuth caches in the diff
-- [ ] `trading.dry_run` is still `true` in `config/settings.json`
+- [ ] `execution.dry_run` is still `true` in `config/settings.json`
 - [ ] New configuration (if any) is added to `config/settings.json`, not to `.env`
 - [ ] `pytest` passes locally
 - [ ] README updated if behaviour changed

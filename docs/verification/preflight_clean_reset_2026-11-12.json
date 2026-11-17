@@ -1,0 +1,23 @@
+{
+  "python": "3.13.6",
+  "dry_run": true,
+  "discovery_enabled": false,
+  "legacy_sentiment_selection_enabled": true,
+  "live_release_approved": false,
+  "configuration_errors": [],
+  "state_load_error": null,
+  "local_positions": 0,
+  "legacy_state_present": false,
+  "account_binding_present": true,
+  "unresolved_local_intents": 0,
+  "sentiment_dependencies_installed": true,
+  "local_validation_passed": true,
+  "live_ready": false,
+  "provider_billing_reconciliation": "Pending after real usage; does not block local operation.",
+  "requires_runtime_evidence": [
+    "Broker reconciliation on startup",
+    "Current process identity and heartbeat after startup",
+    "Explicit owner-controlled live activation"
+  ],
+  "no_waiting_period": "No fixed trial period, minimum trade count or automatic exposure ramp."
+}

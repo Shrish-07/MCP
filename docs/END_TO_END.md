@@ -1,8 +1,22 @@
 # End-to-end trading agent walkthrough
 
+See [Authentication and account verification](AUTHENTICATION.md) for the cache,
+renewal flow, account binding and local-to-Docker persistence procedure.
+
+The authorized November 12 reset is complete. The journal store contains zero
+old entries, the schema-2 local portfolio contains zero positions, and the local
+account binding matches the uniquely selected owner-confirmed account. Broker
+reads before and after the reset returned zero observed assets and active
+orders, with 27 terminal historical orders. No broker state changed.
+
+Old canonical execution history remains available for audit/recovery. A reset
+baseline excludes those old fill IDs from journal reconstruction. Static
+universe inputs and configured watchlists are intentional inputs rather than
+historical research memory and were preserved.
+
 ## A. Startup
 
-Run `python main.py` from the repository root. The entry point takes an instance lock and starts `TradingAgent.start`. Configuration merges defaults and `config/settings.json`, then loads environment settings with dotenv. Validation errors prevent unsafe startup. The broker client reuses a valid cached OAuth token, attempts refresh when needed, and can perform dynamic registration and browser PKCE authentication on interactive startup. It selects exactly one eligible agentic account. The state store binds a fingerprint of that account on its first complete reconciliation and checks it on later reads.
+Run `python main.py` from the repository root. The entry point takes an instance lock and starts `TradingAgent.start`. Configuration merges defaults and `config/settings.json`, then loads environment settings with dotenv. Validation errors prevent unsafe startup. The broker client reuses a valid cached OAuth token, attempts refresh when needed, and can perform dynamic registration and browser PKCE authentication on interactive startup. It selects exactly one eligible agentic account. The current clean state is already bound to the verified account. Subsequent reconciliation checks that fingerprint before accepting holdings.
 
 Position and order state load before startup reconciliation. Persisted pending intents retain their state across restart. A complete, matching-account holdings read and order reconciliation are required before holdings are replaced. Startup installs the scheduler and monitor. Actual submissions require explicit live-release approval, dry run disabled, a healthy applicable execution gate, and an absent manual stop file. A failed dependency read blocks the operation that depends on it. An invalid OAuth session requires restoration before broker actions can resume.
 
@@ -45,6 +59,10 @@ These scores express a hypothesis about relative news and price behavior. The re
 A BUY needs a valid decision, fresh matching live quote, available buying power and applicable release, reconciliation and exposure gates. The engine combines the edge ladder and volatility multiplier, caps the allocation and retains a cash buffer. Pending buys reserve remaining shares at their reference price. Confirmed buys since the cash snapshot also reduce availability. Before submitting, the engine persists its intent under execution locks. A definitive rejection ends that intent. An ambiguous response leaves it unresolved for reconciliation and prevents blind resubmission. Only confirmed fills establish lots, quantity and weighted cost. In dry run, preview results remain separate from live holdings.
 
 ## F. Position monitoring
+
+`PositionManager.update_record` now preserves the persisted stop and peak maxima
+and rejects stale quantity, cost or lifecycle changes. The explicit verified
+corporate-action path applies its separate consistent price-basis adjustment.
 
 The independent market-hours monitor defaults to 15 seconds. It examines matching fresh quotes, uses bid when available, updates peak, excursion and stop state, and reconciles broker state. Stale or out-of-order quotes cannot justify a new action. A valid hard stop bypasses Claude and specialized-review delays, subject to the operational broker gates. A gap through a stop triggers at the observable executable price. The fill may be worse than the stop level. A host or broker outage interrupts software-managed protection.
 
@@ -91,11 +109,13 @@ The Anthropic wrapper records usage by attempt, model and rate version. Cost use
 
 ## K. Schedule
 
-Times are New York time by default. Startup reconciles and can catch up the eligible OPEN, MID or CLOSE cycle. The regular decision schedule is 09:35, 12:30 and 15:30, with the exchange calendar gating holidays and shortened sessions. The position monitor defaults to 15 seconds during market hours. Heartbeat is 30 seconds. The daily report runs at 16:05 and nightly maintenance at 20:00. Optional discovery refresh runs Sunday at 20:00, with the legacy selector configured separately. Decision cycles share a process-local lock. Monitoring remains independent.
+Times are New York time by default. Startup reconciles and can catch up the eligible OPEN, MID or CLOSE cycle. The regular decision schedule is 09:35, 12:30 and 15:30, with the exchange calendar gating holidays and shortened sessions. One interval job polls positions every 15 seconds; its callback gates actual work on the exchange calendar. Heartbeat runs on the event loop every 30 seconds. The daily report runs at 16:05 and nightly maintenance at 20:00. Optional discovery refresh runs Sunday at 20:00. Enabled discovery bypasses the legacy selector and bootstraps missing/stale or missed-weekly output. An unavailable discovery shortlist does not silently select legacy names. Open positions remain a separate research path. Startup also recovers missed held-position nightly maintenance. These background tasks start after the safety scheduler; decision research waits for them. Each ticker receives a fresh quote before its review. Decision cycles share a process-local lock; monitoring remains independent.
 
 ## L. Shutdown and restart
 
-Graceful shutdown stops scheduler work and cancels the background review worker. Durable order intents, fills, stop ratchets and unresolved rotations are recovered on the next start. Broker orders can remain open while the backend is down. Matching-account reconciliation is needed before new dependent actions. A pending intent with no confirmed broker identifier requires operator reconciliation. The scheduler lock prevents in-process overlap and does not provide durable cross-restart cycle deduplication.
+The lifecycle records process identity and a fresh heartbeat even outside market hours. Startup failures and normal shutdown mark the process stopped and restore the signal handler. SIGTERM requests shutdown through the event loop. Health distinguishes an absent process, stale heartbeat, authentication failure, broker outage and failed reconciliation.
+
+Graceful shutdown stops scheduler work and cancels active startup/catch-up, discovery, held-maintenance and review tasks. SIGTERM is observed even while startup research is waiting. Durable order intents, fills, stop ratchets and unresolved rotations are recovered on the next start. Broker orders can remain open while the backend is down. Matching-account reconciliation is needed before new dependent actions. A pending intent with no confirmed broker identifier requires operator reconciliation. The scheduler lock prevents in-process overlap and does not provide durable cross-restart cycle deduplication. A failed decision cycle records its failure and releases its lock; it does not shut down protection or prevent the next scheduled cycle.
 
 ## M. Architecture and execution sequences
 

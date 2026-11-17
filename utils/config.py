@@ -10,6 +10,7 @@ FAIL-SAFE RULE:
     e.g. execution.dry_run can ONLY be enabled by an explicit boolean `false`
     in settings.json; anything else (missing key, typo, null) means dry-run.
 """
+
 from __future__ import annotations
 
 import copy
@@ -20,7 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from utils.strategy_config import DEFAULTS as STRATEGY_DEFAULTS, validate
+
+from utils.strategy_config import DEFAULTS as STRATEGY_DEFAULTS
+from utils.strategy_config import validate
 
 logger = logging.getLogger("robinhood-agent.utils.config")
 
@@ -52,9 +55,12 @@ _DEFAULTS: dict[str, Any] = {
         "market_hours": {"calendar": "NYSE", "stale_data_guard": True},
     },
     "schedule": {
-        "open_hour": 9, "open_minute": 35,
-        "mid_hour": 12, "mid_minute": 30,
-        "close_hour": 15, "close_minute": 30,
+        "open_hour": 9,
+        "open_minute": 35,
+        "mid_hour": 12,
+        "mid_minute": 30,
+        "close_hour": 15,
+        "close_minute": 30,
         "timezone": "America/New_York",
     },
     "monitor": {
@@ -72,7 +78,11 @@ _DEFAULTS: dict[str, Any] = {
     "news": {},
     "sentiment_selection": {},
     "cost_tracking": {"enabled": True, "pricing": {}},
-    "reporting": {"attribution_enabled": True, "attribution_hour": 16, "attribution_minute": 5},
+    "reporting": {
+        "attribution_enabled": True,
+        "attribution_hour": 16,
+        "attribution_minute": 5,
+    },
 }
 
 
@@ -107,19 +117,24 @@ def _safe_bool(value: Any, default: bool = True) -> bool:
     return default
 
 
-def load_config() -> dict:
+def load_config(*, include_secrets: bool = True) -> dict:
     """Load + validate config/settings.json with fail-safe defaults applied."""
-    load_dotenv(".env", override=False)
     base = Path(__file__).resolve().parent.parent
+    if include_secrets:
+        load_dotenv(base / ".env", override=False)
     path = base / "config" / "settings.json"
 
     try:
         user_settings = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        logger.error("config_missing path=%s — running on SAFE DEFAULTS (dry-run)", path)
+        logger.error(
+            "config_missing path=%s — running on SAFE DEFAULTS (dry-run)", path
+        )
         user_settings = {}
     except json.JSONDecodeError as exc:
-        logger.error("config_malformed error=%s — running on SAFE DEFAULTS (dry-run)", exc)
+        logger.error(
+            "config_malformed error=%s — running on SAFE DEFAULTS (dry-run)", exc
+        )
         user_settings = {}
 
     if not isinstance(user_settings, dict):
@@ -137,20 +152,30 @@ def load_config() -> dict:
     execution["dry_run"] = execution.get("dry_run") is not False
     if str(execution.get("mcp_url", "")).strip() == "":
         execution["mcp_url"] = _DEFAULTS["execution"]["mcp_url"]
-    if str(execution.get("tradability_fail_mode", "")).lower() not in ("closed", "open"):
+    if str(execution.get("tradability_fail_mode", "")).lower() not in (
+        "closed",
+        "open",
+    ):
         execution["tradability_fail_mode"] = "closed"
 
     # env block: secrets from .env, safety switches from settings.json ONLY.
     settings["env"] = {
-        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
-        "FINNHUB_API_KEY": os.getenv("FINNHUB_API_KEY", ""),
+        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", "")
+        if include_secrets
+        else "",
+        "FINNHUB_API_KEY": os.getenv("FINNHUB_API_KEY", "") if include_secrets else "",
         "DRY_RUN": settings["execution"]["dry_run"],
     }
     settings["configuration_errors"] = validate(settings)
     if settings["configuration_errors"]:
         execution["dry_run"] = True
         settings["env"]["DRY_RUN"] = True
-        logger.error("configuration_invalid errors=%s", settings["configuration_errors"])
+        logger.error(
+            "configuration_invalid errors=%s", settings["configuration_errors"]
+        )
     import hashlib
-    settings["config_revision"] = hashlib.sha256(json.dumps(user_settings,sort_keys=True).encode()).hexdigest()
+
+    settings["config_revision"] = hashlib.sha256(
+        json.dumps(user_settings, sort_keys=True).encode()
+    ).hexdigest()
     return settings

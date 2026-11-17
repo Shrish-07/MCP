@@ -1,14 +1,15 @@
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from datetime import datetime, timezone, timedelta
+
 import pytest
+from test_p0_safety import decision, portfolio, result, seed
 
 from core.backend import Backend
 from core.execution.engine import ExecutionEngine
 from core.position.manager import PositionManager
-from models.market_data import EquityQuote
 from models.decisions import ExecutionResult
-from test_p0_safety import portfolio, seed, decision, result
+from models.market_data import EquityQuote
 
 
 def build(tmp_path, monkeypatch):
@@ -33,7 +34,7 @@ def build(tmp_path, monkeypatch):
         ask=81,
         volume=1,
         prev_close=100,
-        timestamp=datetime.now(timezone.utc).isoformat(),
+        timestamp=datetime.now(UTC).isoformat(),
     )
     client.get_equity_quotes.return_value = [q]
     agent = SimpleNamespace(
@@ -48,7 +49,7 @@ def build(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_monitor_submission_no_model_and_no_duplicate(tmp_path, monkeypatch):
-    b, c, pm, q = build(tmp_path, monkeypatch)
+    b, c, pm, _q = build(tmp_path, monkeypatch)
     await b.monitor()
     await b.monitor()
     c.place_equity_order.assert_awaited_once()
@@ -59,7 +60,7 @@ async def test_monitor_submission_no_model_and_no_duplicate(tmp_path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_pending_add_does_not_suspend_stop(tmp_path, monkeypatch):
-    b, c, pm, quote = build(tmp_path, monkeypatch)
+    b, c, pm, _quote = build(tmp_path, monkeypatch)
     add = pm.create_order(decision("ADD_TO_POSITION"), "buy", 2, 100)
     update = result("SUBMITTED", qty=0, order_id="buy-in-flight")
     pm.update_order(add, update)
@@ -73,7 +74,7 @@ async def test_pending_add_does_not_suspend_stop(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_stale_quote_or_broker_down_does_not_submit(tmp_path, monkeypatch):
     b, c, pm, q = build(tmp_path, monkeypatch)
-    q.timestamp = (datetime.now(timezone.utc) - timedelta(minutes=3)).isoformat()
+    q.timestamp = (datetime.now(UTC) - timedelta(minutes=3)).isoformat()
     await b.monitor()
     c.place_equity_order.assert_not_called()
     assert b.health.state["quotes"]["error"]
@@ -95,7 +96,16 @@ async def test_rotation_partial_sell_never_buys_and_recovers(tmp_path, monkeypat
     d = decision("ROTATE", ticker="NEW", rotate_from_ticker="ABC")
     r = await b.agent.executor.execute(
         d,
-        portfolio(Position(ticker="ABC", quantity=2, avg_cost=100,current_price=100,market_value=200,sector="Technology")),
+        portfolio(
+            Position(
+                ticker="ABC",
+                quantity=2,
+                avg_cost=100,
+                current_price=100,
+                market_value=200,
+                sector="Technology",
+            )
+        ),
         100,
         False,
         avg_volume_30d=1e6,
@@ -112,6 +122,7 @@ async def test_rotation_partial_sell_never_buys_and_recovers(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_concurrent_duplicate_buys_submit_once(tmp_path):
     import asyncio
+
     from test_p0_safety import portfolio
 
     pm = PositionManager(str(tmp_path / "positions.json"))
@@ -123,11 +134,11 @@ async def test_concurrent_duplicate_buys_submit_once(tmp_path):
     e = ExecutionEngine(
         c, pm, {"env": {"DRY_RUN": False}, "execution": {"live_release_approved": True}}
     )
-    kwargs = dict(
-        dry_run=False,
-        avg_volume_30d=1e6,
-        quote_timestamp=datetime.now(timezone.utc).isoformat(),
-    )
+    kwargs = {
+        "dry_run": False,
+        "avg_volume_30d": 1e6,
+        "quote_timestamp": datetime.now(UTC).isoformat(),
+    }
     await asyncio.gather(
         e.execute(decision(), portfolio(), 100, **kwargs),
         e.execute(decision(), portfolio(), 100, **kwargs),
@@ -136,45 +147,116 @@ async def test_concurrent_duplicate_buys_submit_once(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_hung_specialized_model_does_not_block_hard_stop(tmp_path,monkeypatch):
+async def test_hung_specialized_model_does_not_block_hard_stop(tmp_path, monkeypatch):
     import asyncio
+
     from models.market_data import MarketMetrics
-    b,c,pm,q=build(tmp_path,monkeypatch)
-    b.agent._monitor_refresh_data=AsyncMock(return_value=(MarketMetrics(ticker="ABC"),[]))
-    started=asyncio.Event();release=asyncio.Event()
-    async def hung(*args,**kwargs):
-        started.set();await release.wait()
-    b.agent.decision_engine.review_exit.side_effect=hung
-    q.price=q.bid=120
+
+    b, c, _pm, q = build(tmp_path, monkeypatch)
+    b.agent._monitor_refresh_data = AsyncMock(
+        return_value=(MarketMetrics(ticker="ABC"), [])
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hung(*args, **kwargs):
+        started.set()
+        await release.wait()
+
+    b.agent.decision_engine.review_exit.side_effect = hung
+    q.price = q.bid = 120
     await b.monitor()
-    await asyncio.wait_for(started.wait(),2)
-    q.price=q.bid=80
+    await asyncio.wait_for(started.wait(), 2)
+    q.price = q.bid = 80
     await b.monitor()
     c.place_equity_order.assert_awaited_once()
     b.review_task.cancel()
-    with pytest.raises(asyncio.CancelledError):await b.review_task
+    with pytest.raises(asyncio.CancelledError):
+        await b.review_task
 
 
-@pytest.mark.parametrize("second_leg_fails",[False,True])
+@pytest.mark.parametrize("second_leg_fails", [False, True])
 @pytest.mark.asyncio
-async def test_rotation_fill_confirmation_and_second_leg_failure(tmp_path,monkeypatch,second_leg_fails):
-    from models.portfolio import Position
+async def test_rotation_fill_confirmation_and_second_leg_failure(
+    tmp_path, monkeypatch, second_leg_fails
+):
     from models.market_data import EquityQuote
-    b,c,pm,q=build(tmp_path,monkeypatch)
+    from models.portfolio import Position
+
+    b, c, pm, q = build(tmp_path, monkeypatch)
     await b.reconcile()
-    c.get_equity_tradability.return_value={"tradeable":True}
+    c.get_equity_tradability.return_value = {"tradeable": True}
+
     async def quotes(tickers):
-        return [EquityQuote(ticker=t,price=100,bid=100,ask=100,volume=1e6,prev_close=100,timestamp=q.timestamp) for t in tickers]
-    async def place(ticker,side,quantity,**kw):
-        failed=second_leg_fails and side=="buy"
-        return ExecutionResult(ticker=ticker,side=side,order_id=side+"-order",status="REJECTED" if failed else "FILLED",
-            quantity=quantity,filled_quantity=0 if failed else quantity,fill_price=100,dry_run=False)
-    c.get_equity_quotes.side_effect=quotes
-    c.place_equity_order.side_effect=place
-    c.get_portfolio.return_value=portfolio()
-    before=portfolio(Position(ticker="ABC",quantity=2,avg_cost=100,current_price=100,market_value=200,sector="Technology"))
-    out=await b.agent.executor.execute(decision("ROTATE",ticker="NEW",rotate_from_ticker="ABC"),before,100,False,
-        avg_volume_30d=1e6,quote_timestamp=q.timestamp)
-    assert out.status==("REJECTED" if second_leg_fails else "FILLED")
-    assert [r.ticker for r in pm.get_open_records()]==([] if second_leg_fails else ["NEW"])
-    assert c.place_equity_order.await_count==2
+        return [
+            EquityQuote(
+                ticker=t,
+                price=100,
+                bid=100,
+                ask=100,
+                volume=1e6,
+                prev_close=100,
+                timestamp=q.timestamp,
+            )
+            for t in tickers
+        ]
+
+    async def place(ticker, side, quantity, **kw):
+        failed = second_leg_fails and side == "buy"
+        return ExecutionResult(
+            ticker=ticker,
+            side=side,
+            order_id=side + "-order",
+            status="REJECTED" if failed else "FILLED",
+            quantity=quantity,
+            filled_quantity=0 if failed else quantity,
+            fill_price=100,
+            dry_run=False,
+        )
+
+    c.get_equity_quotes.side_effect = quotes
+    c.place_equity_order.side_effect = place
+    c.get_portfolio.return_value = portfolio(
+        Position(
+            ticker="KEEP", quantity=1, avg_cost=100, current_price=100, market_value=100
+        )
+    )
+    before = portfolio(
+        Position(
+            ticker="KEEP",
+            quantity=1,
+            avg_cost=100,
+            current_price=100,
+            market_value=100,
+            sector="Financials",
+        ),
+        Position(
+            ticker="ABC",
+            quantity=2,
+            avg_cost=100,
+            current_price=100,
+            market_value=200,
+            sector="Technology",
+        ),
+    )
+    out = await b.agent.executor.execute(
+        decision("ROTATE", ticker="NEW", rotate_from_ticker="ABC"),
+        before,
+        100,
+        False,
+        avg_volume_30d=1e6,
+        quote_timestamp=q.timestamp,
+    )
+    assert out.status == ("REJECTED" if second_leg_fails else "FILLED")
+    assert [r.ticker for r in pm.get_open_records()] == (
+        [] if second_leg_fails else ["NEW"]
+    )
+    assert c.place_equity_order.await_count == 2
+    import json
+
+    rows = json.loads(b.agent.executor._trades_path.read_text())
+    buy_row = next(row for row in rows if row["side"] == "buy")
+    assert buy_row["rotate_from_ticker"] == "ABC"
+    assert buy_row["rotate_sell_quantity"] == 2
+    assert buy_row["rotate_sell_price"] == 100
+    assert len([row for row in rows if row["order_id"] == "buy-order"]) == 1

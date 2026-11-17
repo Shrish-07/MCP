@@ -1,0 +1,60 @@
+{
+  "date": "2026-11-12",
+  "verdict": "READY WITH EXPLICIT LIMITATIONS",
+  "pytest": {
+    "command": "python -B docs/verification/run_offline_audit_2026-11-12.py -m ''",
+    "exit": 0,
+    "passed": 214,
+    "failed": 0,
+    "skipped": 0,
+    "deselected": 0,
+    "warnings": 1,
+    "seconds": 46.8
+  },
+  "ruff_repository_exit": 0,
+  "active_pyflakes_exit": 0,
+  "compileall_exit": 0,
+  "pip_check_exit": 0,
+  "preflight_exit": 0,
+  "healthcheck": {
+    "exit": 1,
+    "status": "PROCESS_ABSENT",
+    "expected_without_starting_backend": true
+  },
+  "model_versions": {
+    "torch": "2.13.0",
+    "transformers": "5.16.1",
+    "accelerate": "1.14.0",
+    "huggingface-hub": "1.29.0",
+    "safetensors": "0.8.0",
+    "filelock": "4.2.10",
+    "fsspec": "2026.9.0",
+    "hf-xet": "1.8.0",
+    "jinja2": "3.1.6",
+    "mpmath": "1.3.0",
+    "networkx": "3.7",
+    "sympy": "1.14.0",
+    "tokenizers": "0.23.3",
+    "tqdm": "4.70.1"
+  },
+  "broker_read_tool_requests": 8,
+  "broker_writes": 0,
+  "credential_writes": 0,
+  "paid_provider_calls": 0,
+  "normal_scheduler_started": false,
+  "initial_protected_files_unchanged": 24,
+  "unexpected_protected_changes": [],
+  "configuration_unchanged": true,
+  "initial_branch": "Shrish-07-changes",
+  "initial_head": "e81a48ffc859d4f2df671d2d205626229237f991",
+  "initial_git_status": " M CONTRIBUTING.md\n M README.md\n M SECURITY.md\n M core/position/manager.py\n D docs/BASELINE.json\n M docs/END_TO_END.md\n M docs/PRODUCTION_READINESS_AUDIT.md\n D docs/history/README_pre_swing_upgrade.md\n M docs/verification/README.md\n D docs/verification/pipeline_verified_2026-11-10.png\n D docs/verification/preflight_2026-11-10.txt\n D scripts/record_baseline.py\n M utils/logger.py\n?? docs/AUTHENTICATION.md\n?? docs/DEPLOYMENT.md\n?? docs/verification/account_state_2026-11-12.json\n?? docs/verification/checks_2026-11-12.json\n?? docs/verification/journal_cleanup_2026-11-12.json\n?? docs/verification/preflight_2026-11-12.json\n?? docs/verification/pytest_2026-11-12.txt\n?? docs/verification/run_offline_audit_2026-11-12.py\n?? tests/test_final_readiness.py\n",
+  "intermediate_failures_corrected": [
+    "Windows extended-length path required for Torch wheel installation",
+    "Mock tokenizer needed anonymous pinned-revision arguments",
+    "Backup validation needed to distinguish resolved order progress from unmatched history",
+    "Windows lock-content test needed to read through the owning handle"
+  ],
+  "credential_persistence_recovery_test": "passed with synthetic credentials and mocked writes",
+  "final_test_evidence": "pytest_clean_reset_verified_2026-11-12.txt",
+  "offline_runner_guard_ast_preserved": true
+}

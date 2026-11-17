@@ -1,5 +1,6 @@
 """Parsing fixes: edge clamping (no more silent zeroing) and
 case-insensitive decision parsing in the DecisionEngine."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
@@ -13,18 +14,31 @@ def _engine() -> DecisionEngine:
     journal = MagicMock()
     journal.summarise_for_prompt.return_value = ""
     earnings = MagicMock()
-    return DecisionEngine(client, journal, earnings, settings={
-        "trading": {"edge_score_threshold": 3.0, "max_positions": 12},
-        "news": {}, "sentiment_selection": {},
-    })
+    return DecisionEngine(
+        client,
+        journal,
+        earnings,
+        settings={
+            "trading": {"edge_score_threshold": 3.0, "max_positions": 12},
+            "news": {},
+            "sentiment_selection": {},
+        },
+    )
 
 
 def test_edge_clamps_out_of_range_components():
     eng = _engine()
     # catalyst_strength 2.5 was previously SILENTLY zeroed (Pydantic reject)
-    e = eng._parse_edge({"edge": {"catalyst_strength": 2.5,
-                                  "technical_confirmation": 1.0,
-                                  "portfolio_fit": 2.0}}, "NVDA")
+    e = eng._parse_edge(
+        {
+            "edge": {
+                "catalyst_strength": 2.5,
+                "technical_confirmation": 1.0,
+                "portfolio_fit": 2.0,
+            }
+        },
+        "NVDA",
+    )
     assert e.catalyst_strength == 2.0
     assert e.portfolio_fit == 1.0
     assert e.total == 4.0  # survives instead of dying as 0.0 (2.0+1.0+1.0)
@@ -52,7 +66,8 @@ def test_decision_parsing_case_insensitive():
 
 
 def test_strip_fences_single_source():
-    from utils.anthropic_client import strip_fences
     from core.decision.engine import DecisionEngine as DE
-    assert strip_fences("```json\n{\"a\":1}\n```") == '{"a":1}'
-    assert DE._strip_fences("```json\n{\"a\":1}\n```") == '{"a":1}'  # same behaviour
+    from utils.anthropic_client import strip_fences
+
+    assert strip_fences('```json\n{"a":1}\n```') == '{"a":1}'
+    assert DE._strip_fences('```json\n{"a":1}\n```') == '{"a":1}'  # same behaviour
