@@ -33,6 +33,7 @@ class WeeklySelector:
         self.universe_size = int(ss.get("universe_size", 10))
         self.max_positions = int(config.get("trading", {}).get("max_positions", 12))
         self.lookback_days = int(ss.get("lookback_days", 7))
+        self.batch_size = ss.get("batch_size", 16)
         self.min_sentiment_score = float(ss.get("min_sentiment_score", -1.0))
 
         self.data_dir = Path(__file__).resolve().parent.parent.parent / "data"
@@ -45,7 +46,10 @@ class WeeklySelector:
             if position_manager is not None
             else PositionManager(config=config)
         )
-        self.news_fetcher = WeeklyNewsFetcher(lookback_days=self.lookback_days)
+        self.news_fetcher = WeeklyNewsFetcher(
+            lookback_days=self.lookback_days,
+            cache_max_age_hours=ss.get("cache_max_age_hours", 24),
+        )
         self.sentiment_model = None  # Lazy load
 
         self.candidate_universe: list[str] = []
@@ -221,8 +225,7 @@ class WeeklySelector:
           3. Aggregate to a single ticker score using the MEAN of the
              individual headline scores (not first, not max).
           4. A ticker with zero headlines gets a neutral score of 0.0.
-          5. A scoring failure for a ticker falls back to 0.0 and is logged;
-             it never aborts the whole scoring pass.
+          5. An inference failure aborts the pass and preserves the last selection.
         """
         self.logger.info("Fetching news for %d tickers...", len(tickers))
         if self.sentiment_model is None:
@@ -244,7 +247,9 @@ class WeeklySelector:
 
             try:
                 scores_list = await asyncio.to_thread(
-                    self.sentiment_model.score_headlines, headlines
+                    self.sentiment_model.score_headlines,
+                    headlines,
+                    batch_size=self.batch_size,
                 )
                 # Ticker score = MEAN of per-headline sentiment scores
                 scores[ticker] = (
@@ -327,9 +332,7 @@ class WeeklySelector:
             selected = select_universe(
                 held_tickers=set() if new_contract else current_holdings,
                 scored_candidates=scores,
-                universe_size=discovery_cfg["shortlist"]["new_candidate_count"]
-                if new_contract
-                else self.universe_size,
+                universe_size=self.universe_size,
                 max_positions=self.max_positions,
                 min_sentiment_score=self.min_sentiment_score,
             )

@@ -1,6 +1,8 @@
 .git
 .env
+.env.*
 .rh_oauth_cache.json
+oauth
 venv
 .venv*
 .test-tmp
@@ -8,5 +10,8 @@ venv
 __pycache__
 logs
 journals
-data/replays
+data/*
+!data/sp500_universe.json
+!data/candidate_universe.json
+docs/verification
 *.zip

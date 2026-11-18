@@ -5,15 +5,15 @@ SOURCE OF TRUTH RULE:
     schedule, monitor speed, dry-run...). .env contains ONLY secrets
     (ANTHROPIC_API_KEY, FINNHUB_API_KEY). Nothing else lives in the env.
 
-FAIL-SAFE RULE:
-    Any missing or malformed critical value degrades to the SAFE behaviour —
-    e.g. execution.dry_run can ONLY be enabled by an explicit boolean `false`
-    in settings.json; anything else (missing key, typo, null) means dry-run.
+Live execution requires the JSON boolean false for execution.dry_run and
+separate explicit release approval. Keys beginning with "// " document
+settings in standard JSON and are removed before validation and hashing.
 """
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -40,6 +40,7 @@ _DEFAULTS: dict[str, Any] = {
         "tradability_fail_mode": "closed",
         "min_dollar_volume": 75_000_000,
     },
+    "logging": {"level": "INFO"},
     "trading": {
         "max_positions": 12,
         "max_position_pct": 0.08,
@@ -75,8 +76,25 @@ _DEFAULTS: dict[str, Any] = {
         "default_tickers": [],
         "robinhood_watchlist_name": "Default",
     },
-    "news": {},
-    "sentiment_selection": {},
+    "news": {
+        "provider": "finnhub",
+        "lookback_days": 3,
+        "max_per_ticker": 5,
+        "fresh_window_hours": 24,
+        "general_market": {"enabled": True, "category": "general", "count": 8},
+    },
+    "sentiment_selection": {
+        "enabled": False,
+        "universe_size": 10,
+        "lookback_days": 7,
+        "min_sentiment_score": -1.0,
+        "schedule_day": "sun",
+        "schedule_hour": 20,
+        "schedule_minute": 0,
+        "schedule_timezone": "America/New_York",
+        "batch_size": 16,
+        "cache_max_age_hours": 24,
+    },
     "cost_tracking": {"enabled": True, "pricing": {}},
     "reporting": {
         "attribution_enabled": True,
@@ -97,43 +115,39 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return merged
 
 
-def _safe_bool(value: Any, default: bool = True) -> bool:
-    """Coerce anything to bool with a fail-safe default.
-
-    For dry-run semantics: live trading (False) is enabled ONLY by an
-    explicit `false`. Everything unknown/unparseable falls back to default.
-    """
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text == "false":
-        return False
-    if text == "true":
-        return True
-    return default
+def _settings_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key.startswith("// "):
+            continue
+        if key in result:
+            raise ValueError("Duplicate settings key")
+        result[key] = value
+    return result
 
 
-def load_config(*, include_secrets: bool = True) -> dict:
+def load_config(*, include_secrets: bool = True, root: Path | None = None) -> dict:
     """Load + validate config/settings.json with fail-safe defaults applied."""
-    base = Path(__file__).resolve().parent.parent
-    if include_secrets:
-        load_dotenv(base / ".env", override=False)
+    base = (
+        Path(root).resolve()
+        if root is not None
+        else Path(__file__).resolve().parents[1]
+    )
     path = base / "config" / "settings.json"
 
     try:
-        user_settings = json.loads(path.read_text(encoding="utf-8"))
+        user_settings = json.loads(
+            path.read_text(encoding="utf-8-sig"), object_pairs_hook=_settings_object
+        )
     except FileNotFoundError:
         logger.error(
             "config_missing path=%s — running on SAFE DEFAULTS (dry-run)", path
         )
         user_settings = {}
-    except json.JSONDecodeError as exc:
+    except (OSError, ValueError) as exc:
         logger.error(
-            "config_malformed error=%s — running on SAFE DEFAULTS (dry-run)", exc
+            "config_unreadable type=%s — running on SAFE DEFAULTS (dry-run)",
+            type(exc).__name__,
         )
         user_settings = {}
 
@@ -141,39 +155,33 @@ def load_config(*, include_secrets: bool = True) -> dict:
         logger.error("config_not_a_dict — running on SAFE DEFAULTS (dry-run)")
         user_settings = {}
 
-    settings = _deep_merge(_deep_merge(_DEFAULTS, STRATEGY_DEFAULTS), user_settings)
-    for section in ("execution", "trading", "models", "schedule", "monitor"):
+    defaults = _deep_merge(_DEFAULTS, STRATEGY_DEFAULTS)
+    settings = _deep_merge(defaults, user_settings)
+    errors = validate(settings, defaults)
+    for section in defaults:
         if not isinstance(settings.get(section), dict):
-            settings[section] = copy.deepcopy(_DEFAULTS[section])
-            settings["execution"]["dry_run"] = True
+            settings[section] = defaults[section]
 
     # ---- Fail-safe coercions on the critical safety switches ----
     execution = settings["execution"]
-    execution["dry_run"] = execution.get("dry_run") is not False
-    if str(execution.get("mcp_url", "")).strip() == "":
-        execution["mcp_url"] = _DEFAULTS["execution"]["mcp_url"]
-    if str(execution.get("tradability_fail_mode", "")).lower() not in (
-        "closed",
-        "open",
-    ):
-        execution["tradability_fail_mode"] = "closed"
+    execution["dry_run"] = bool(errors) or execution.get("dry_run") is not False
+    execution["live_release_approved"] = execution.get("live_release_approved") is True
 
     # env block: secrets from .env, safety switches from settings.json ONLY.
+    if include_secrets and not errors:
+        load_dotenv(base / ".env", override=False)
     settings["env"] = {
         "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", "")
-        if include_secrets
+        if include_secrets and not errors
         else "",
-        "FINNHUB_API_KEY": os.getenv("FINNHUB_API_KEY", "") if include_secrets else "",
+        "FINNHUB_API_KEY": os.getenv("FINNHUB_API_KEY", "")
+        if include_secrets and not errors
+        else "",
         "DRY_RUN": settings["execution"]["dry_run"],
     }
-    settings["configuration_errors"] = validate(settings)
-    if settings["configuration_errors"]:
-        execution["dry_run"] = True
-        settings["env"]["DRY_RUN"] = True
-        logger.error(
-            "configuration_invalid errors=%s", settings["configuration_errors"]
-        )
-    import hashlib
+    settings["configuration_errors"] = errors
+    if errors:
+        logger.error("configuration_invalid errors=%s", errors)
 
     settings["config_revision"] = hashlib.sha256(
         json.dumps(user_settings, sort_keys=True).encode()

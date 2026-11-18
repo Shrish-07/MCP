@@ -36,6 +36,8 @@ class AnthropicClient:
         max_tokens: int = 4096,
         send_temperature: bool = False,
         temperature: float = 0.1,
+        *,
+        cost_tracking_enabled: bool = True,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
@@ -44,7 +46,7 @@ class AnthropicClient:
         self.send_temperature = send_temperature
         self.temperature = temperature
         self.logger = logging.getLogger("robinhood-agent.anthropic")
-        self.cost_tracker = CostTracker()
+        self.cost_tracker = CostTracker() if cost_tracking_enabled else None
         # Strategic model availability must not prevent the safety backend
         # from starting. Missing credentials fail only the advisory call.
         self.client = None
@@ -75,6 +77,8 @@ class AnthropicClient:
                     if getattr(block, "type", "") == "text"
                 )
                 usage = getattr(response, "usage", None)
+                if self.cost_tracker is None:
+                    return strip_fences(text)
                 if usage is not None:
                     cache_create = getattr(usage, "cache_creation_input_tokens", 0) or 0
                     cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
@@ -124,6 +128,8 @@ class AnthropicClient:
         raise RuntimeError("Anthropic API request failed") from last_error
 
     def _record_unpriced(self, reason, request_id):
+        if self.cost_tracker is None:
+            return
         try:
             self.cost_tracker.record_unpriced(self.model, reason, request_id)
         except (OSError, ValueError):

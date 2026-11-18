@@ -33,3 +33,6 @@ data/discovery_ranked_latest.json*
 data/features_*.json*
 data/catalyst_events.json*
 data/pead_events.json*
+
+# ---- export tooling (keep local) ----
+generate zip.py

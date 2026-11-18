@@ -5,21 +5,21 @@ Code owns holdings/order truth, sizing and stops. Claude Sonnet supplies advisor
 theses. Local sentiment and discovery are optional. A 15-second poll enforces
 exits; it is not an entry-generation schedule.
 
-**Shipping settings: dry run, live release unapproved, discovery disabled.**
+Missing or unreadable settings fall back to dry run with live release approval
+and discovery disabled. Check `config/settings.json` for the active choices in
+this checkout. Live submissions require both `execution.dry_run: false` and
+`execution.live_release_approved: true`, plus the runtime execution checks.
 Authentication and account verification are described in
 [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md). The full system walkthrough is in
 [docs/END_TO_END.md](docs/END_TO_END.md).
 The latest offline engineering fixes and verification are in
 [docs/MASTER_REMEDIATION.md](docs/MASTER_REMEDIATION.md).
 The November 16 operating procedure and standalone wiring audit are in
-verification results are in [docs/MONDAY_READINESS.md](docs/MONDAY_READINESS.md).
+[docs/MONDAY_READINESS.md](docs/MONDAY_READINESS.md).
 Earlier evidence remains in
 [docs/PRODUCTION_READINESS_AUDIT.md](docs/PRODUCTION_READINESS_AUDIT.md).
-The authorized reset removed all remaining journal context and four legacy local
-positions. The current schema-2 book is empty and bound to the verified account.
-Both configured sentiment models load locally, and the complete guarded test
-suite passes. Live orders remain disabled. The current phase covers local
-operation only.
+Those reports describe their respective runs. Current state is established by
+reconciliation in the running backend.
 
 ## Start locally when ready
 
@@ -30,11 +30,9 @@ From the repository root, use the existing project environment.
 & .\.venv-upgrade\Scripts\python.exe main.py
 ```
 
-The second command starts the actual scheduler, restores and reconciles state,
-starts process health/heartbeat tracking, and may run a catch-up cycle. Normal
-research and decision jobs use configured news and Claude services. This command
-was not executed during the reset task. Dry run remains true, live release
-approval remains false, and discovery remains disabled.
+The second command starts the scheduler, reconciles state, starts heartbeat
+tracking, and may run a catch-up cycle. It uses the active execution mode in
+`config/settings.json`. The smoke script uses the same mode and instance lock.
 
 In another terminal, inspect actual process health with the following command.
 
@@ -71,7 +69,10 @@ scores. Model failures do not disable deterministic exits.
 
 Put only `ANTHROPIC_API_KEY` and `FINNHUB_API_KEY` in `.env`. Do not commit `.env`,
 OAuth tokens or runtime account state. Settings and flags belong in
-`config/settings.json`, loaded through `utils/config.py`.
+`config/settings.json`, loaded through `utils/config.py`. The adjacent
+`"// …"` properties are documentation in standard JSON. The loader excludes
+them from runtime values and the configuration revision. Invalid typed settings
+block startup, and duplicate keys cause the safe default configuration to load.
 
 ## Execution and persistence
 
@@ -82,9 +83,8 @@ backed up on migration. Corruption blocks orders; it never silently becomes a
 verified empty portfolio. Archived files describe historical runs, not today's
 account.
 
-The current local book has zero positions and no unresolved local intents. Its
-account binding was initialized only after the owner-authorized read-only
-account check. Canonical order/fill records remain protected. Reset metadata
+The account binding is initialized from complete, verified broker state.
+Canonical order/fill records remain protected. Reset metadata
 prevents retained pre-reset fills from rebuilding old journal prompt context.
 Static constituent and candidate inputs, and intentional configured watchlists,
 remain unchanged. Derived selection, feature, sentiment and performance memory
@@ -110,22 +110,27 @@ holdings from stale live files or merges a paper book into a live book.
 
 - Existing initial stop bands remain −7%, −10%, −13%, −16% at 30-day annualized
   volatility floors 0%, 30%, 60%, 90%.
-- A +5% observed peak activates a nominal entry×1.005 profit lock. At +10%, a
-  validated ATR14 permits `peak − 3×ATR14`. Stops never loosen on routine
-  updates, adds, reconciliation or restart.
+- `exits.breakeven_ratchet_pct` and `exits.breakeven_lock_gain_pct` set the
+  gain needed to ratchet and the gain locked above entry. The fallback pair is
+  5% and 0.5%. With the configured chandelier activation (fallback 10%), a
+  validated ATR14 permits `peak − atr_multiple×ATR14`. Stops never loosen on
+  routine updates, adds, reconciliation or restart.
 - ATR uses Wilder smoothing of daily true ranges, seeded from 14 ranges and
   requiring at least 15 contiguous completed exchange sessions. ATR7 is never
   substituted. Stale/missing ATR preserves existing protection.
 - Valid source-timestamped bid prices update peaks each tick. Last trade is the
-  fallback when a bid is unavailable. Missing source timestamps are unavailable
+  fallback for missing bids or exceptionally wide spreads. Missing source timestamps are unavailable
   data; receipt time is not a substitute. Polling cannot protect positions during
   feed/service/broker outages, halts or gaps, or guarantee a stop fill price.
 - Hard stops are persisted before submission and do not call Claude. Soft
   triggers are grouped into one single-ticker review with persistent debounce
   and retry state. A model failure/hang cannot hold the execution lock.
-- +20% graduation requests one defended harvest-or-hold review. A defended HOLD
+- Graduation at `exits.take_profit_pct` (fallback 20%) requests one defended
+  harvest-or-hold review. A defended HOLD
   removes the fixed ceiling and continues the trail. A failed review preserves
-  protection and retries with cooldown. Partial takes are disabled.
+  protection and retries with the configured cooldown. An explicit `SELL/REDUCE`
+  can sell the configured fraction when partial taking is enabled and the gain
+  meets its threshold.
 - Trend break, climax, sentiment reversal, signed gap closure, dead money,
   opportunity cost, PEAD and the 15-session time advisory request judgment.
   Unknown entry dates/baselines/event history disable dependent rules rather
@@ -173,8 +178,9 @@ recommend trades. C requires a confirmed, sourced catalyst; absent event data do
 not produce a fictitious catalyst. D is a holding warning, not a short command.
 
 Failed ranking retains the last good shortlist with separate failed status.
-Stale/invalid output falls back to the existing selector. Turning discovery off
-leaves stops and accounting active.
+When discovery is enabled, stale or invalid output leaves the new-name set
+empty. The legacy selector is available when discovery is off. Stops and
+accounting remain active in either mode.
 
 ## Scheduler and operations
 
@@ -184,9 +190,9 @@ All jobs share one manager, locks, configuration revision and health ledger:
 | --- | --- |
 | Decision cycles | Trading days 09:35, 12:30, 15:30 |
 | Exit monitor | Every 15 seconds in regular NYSE sessions |
-| Nightly held ATR/features/reviews | 20:00 |
+| Nightly held ATR/features/reviews | 20:00 by default, configurable with discovery enabled |
 | Discovery ranking | Sunday 20:00, only when enabled |
-| Fill attribution | Trading days 16:05 |
+| Fill attribution | Weekdays 16:05 by default |
 | Heartbeat watchdog | Every 30 seconds |
 
 Exchange holidays and early closes use the NYSE calendar. Extended hours are
@@ -200,7 +206,8 @@ Diagnostic files rotate at 10 MiB with five backups. Diagnostic trade events use
 `logs/trade_events.jsonl`, leaving `logs/trades.json` for execution results.
 An unhealthy Docker status alone does not restart a running container.
 
-Create `data/STOP_TRADING` to refuse new live order submissions. Removing it
+Create the configured `execution.manual_stop_file` (default `data/STOP_TRADING`)
+to refuse each new live order submission, including both rotation legs. Removing it
 restores eligibility only after normal gates pass. The monitor continues
 observing state and reporting errors. The stop file blocks all new orders,
 including stops, so use it only when intentionally handing execution to an

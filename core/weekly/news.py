@@ -27,10 +27,17 @@ _FINNHUB_COMPANY_NEWS = "https://finnhub.io/api/v1/company-news"
 class WeeklyNewsFetcher:
     """Fetch weekly news from Finnhub with rate limiting, retries, and caching."""
 
-    def __init__(self, lookback_days: int = 7, max_retries: int = 3):
+    def __init__(
+        self,
+        lookback_days: int = 7,
+        max_retries: int = 3,
+        *,
+        cache_max_age_hours: float = 24,
+    ):
         self.logger = logger
         self.lookback_days = lookback_days
         self.max_retries = max_retries
+        self.cache_max_age_hours = cache_max_age_hours
         self._api_key = os.getenv("FINNHUB_API_KEY", "")
         self._cache_dir = Path(__file__).resolve().parent.parent.parent / "data"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -62,12 +69,12 @@ class WeeklyNewsFetcher:
                 "weekly_news_cache_save_failed: %s", type(exc).__name__, exc_info=False
             )
 
-    def _is_cache_fresh(self, cached_entry: dict, max_age_hours: int = 24) -> bool:
+    def _is_cache_fresh(self, cached_entry: dict) -> bool:
         """Check whether a cache entry is still fresh."""
         try:
             cached_at = datetime.fromisoformat(cached_entry.get("cached_at", ""))
             age_hours = (datetime.now() - cached_at).total_seconds() / 3600
-            return age_hours < max_age_hours
+            return 0 <= age_hours < self.cache_max_age_hours
         except Exception as error:
             logging.getLogger(__name__).exception(
                 "Handled failure type=%s", type(error).__name__, exc_info=False

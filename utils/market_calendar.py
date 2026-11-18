@@ -62,7 +62,7 @@ def is_market_open_at(now_utc: datetime | None = None) -> bool:
         row = schedule.iloc[0]
         open_at = row["market_open"].to_pydatetime().astimezone(UTC)
         close_at = row["market_close"].to_pydatetime().astimezone(UTC)
-        return open_at <= now_utc <= close_at
+        return open_at <= now_utc < close_at
     except Exception as exc:
         # FAIL-SAFE: if we cannot prove the market is open, refuse to trade.
         logger.exception(

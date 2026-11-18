@@ -175,21 +175,22 @@ async def test_low_edge_sell_and_paper_isolation(pm):
 
 @pytest.mark.asyncio
 async def test_hard_stop_never_calls_model(pm):
+    from core.decision.engine import DecisionEngine
     from core.position.manager import ExitSignal
-    from main import TradingAgent
+    from models.decisions import CycleType
+    from models.market_data import MarketMetrics
 
     seed(pm)
-    agent = TradingAgent.__new__(TradingAgent)
-    agent.decision_engine = AsyncMock()
+    client = AsyncMock()
+    engine = DecisionEngine(client, None, None)
     rec = pm.get_open_records()[0]
-    d = await agent._evaluate_threshold_signal(
+    d = await engine.review_exit(
         ExitSignal("ABC", "STOP_LOSS", 80, -0.2, 2),
-        rec,
-        "MONITOR",
-        None,
+        MarketMetrics(ticker="ABC"),
         [],
         portfolio(),
-        "",
+        CycleType.MID,
+        position_record=rec,
     )
     assert d.decision == DecisionType.SELL
-    agent.decision_engine.client.complete.assert_not_called()
+    client.complete.assert_not_called()

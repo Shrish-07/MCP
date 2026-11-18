@@ -71,7 +71,7 @@ The independent market-hours monitor defaults to 15 seconds. It examines matchin
 | Rule | Behavior |
 | --- | --- |
 | E1 | Entry stop uses the annual-volatility band, with default losses of 7%, 10%, 13% or 16% at the configured band boundaries. |
-| E2 | At a peak at least 5% above entry, activate a floor at 100.5% of entry. |
+| E2 | At the configured peak gain, activate a floor at entry plus the configured locked gain. Fallbacks are 5% and 0.5%, respectively. |
 | E3 | At a peak at least 10% above entry, use peak less three fresh ATR14 values. The ATR freshness window is five calendar days. |
 | E4 | Keep the maximum of existing, initial and eligible trailing stops. Price at or through the active stop can submit a SELL without Claude. |
 | E5 | Two completed closes below SMA20 after prior profitability queue technical review. |
@@ -81,9 +81,9 @@ The independent market-hours monitor defaults to 15 seconds. It examines matchin
 | E9 | Compare against frozen entry-cohort data. Remaining signed gap at or below 0.3, or an inversion, queues review. Normalized progress uses one minus the signed current gap divided by the absolute entry gap, with clamping. |
 | E10 | A sourced, point-in-time PEAD estimate with at least 30 prior comparable surprise-bucket events can queue review after at least five sessions when 80% of expected 15-session cumulative abnormal return is realized or the decay horizon is reached. Missing evidence leaves the trigger unavailable. |
 | E11 | An alternative with an advantage of at least 0.8 on a comparable reference queues capital review. Rotation still needs independent approval and execution checks. |
-| E12 | At least 15 sessions queues a time review. Age alone does not force liquidation. |
+| E12 | With `monitor.check_max_holding` enabled, the configured number of sessions (fallback 15) queues a time review. |
 
-Specialized reviews use persisted cooldown and hysteresis, including volatility-aware drawdowns and renewed highs. The +20% milestone queues a one-time graduation review. An accepted HOLD keeps the position open under the existing stops and completes graduation. An accepted SELL still requires broker execution and confirmed fills. Incomplete reviews retry under their applicable rules. Partial profit-taking is disabled.
+Specialized reviews use persisted cooldown and hysteresis, including volatility-aware drawdowns and renewed highs. The configured graduation milestone (fallback 20%) queues a one-time review. An accepted HOLD keeps the position open under the existing stops and completes graduation. An accepted SELL still requires broker execution and confirmed fills. Incomplete reviews retry under their applicable rules. An explicit REDUCE requires enabled partial taking and a quote that meets its gain threshold.
 
 ## H. Adds and rotations
 
@@ -109,7 +109,7 @@ The Anthropic wrapper records usage by attempt, model and rate version. Cost use
 
 ## K. Schedule
 
-Times are New York time by default. Startup reconciles and can catch up the eligible OPEN, MID or CLOSE cycle. The regular decision schedule is 09:35, 12:30 and 15:30, with the exchange calendar gating holidays and shortened sessions. One interval job polls positions every 15 seconds; its callback gates actual work on the exchange calendar. Heartbeat runs on the event loop every 30 seconds. The daily report runs at 16:05 and nightly maintenance at 20:00. Optional discovery refresh runs Sunday at 20:00. Enabled discovery bypasses the legacy selector and bootstraps missing/stale or missed-weekly output. An unavailable discovery shortlist does not silently select legacy names. Open positions remain a separate research path. Startup also recovers missed held-position nightly maintenance. These background tasks start after the safety scheduler; decision research waits for them. Each ticker receives a fresh quote before its review. Decision cycles share a process-local lock; monitoring remains independent.
+Times are New York time by default. Startup reconciles and can catch up the eligible OPEN, MID or CLOSE cycle using the configured times and the NYSE calendar. The fallback decision schedule is 09:35, 12:30 and 15:30. The monitor interval defaults to 15 seconds during regular sessions. Heartbeat runs on the event loop every 30 seconds. The weekday report defaults to 16:05 and nightly maintenance to 20:00. When discovery is enabled, its feature hour sets the nightly maintenance time. The weekly discovery job uses its separate rank day and hour. Enabled discovery supplies new candidates and bootstraps missing, stale or missed-weekly output. Until a valid shortlist is available, only holdings go through review. Startup also recovers missed held-position nightly maintenance. These background tasks start after the safety scheduler. Decision research waits for them. Each ticker receives a fresh quote before its review. Decision cycles share a process-local lock and monitoring runs independently.
 
 ## L. Shutdown and restart
 

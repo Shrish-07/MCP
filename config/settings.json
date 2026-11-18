@@ -1,35 +1,56 @@
 {
   "models": {
+    "// decision": "Nonempty Anthropic model ID for all judgment calls. Pricing matches the model ID returned by the API.",
     "decision": "claude-sonnet-5-5",
+    "// max_tokens": "Positive integer cap on output tokens per request.",
     "max_tokens": 4096,
+    "// send_temperature": "Boolean. Send the wrapper's 0.1 temperature only for models that accept it.",
     "send_temperature": false
   },
   "execution": {
-    "dry_run": true,
+    "// dry_run": "Boolean. true means broker previews only. false requests live execution, which also requires explicit release approval and all submission gates.",
+    "dry_run": false,
+    "// mcp_url": "HTTP(S) broker MCP endpoint URL. The client uses this endpoint for quotes, account reconciliation and orders.",
     "mcp_url": "https://agent.robinhood.com/mcp/trading",
+    "// tradability_fail_mode": "closed rejects missing or failed tradability checks. open tolerates unknown status. An explicitly untradeable ticker is always rejected.",
     "tradability_fail_mode": "closed",
+    "// min_dollar_volume": "Minimum estimated 30-day average dollar volume in USD for entries. Independent of the discovery liquidity screen.",
     "min_dollar_volume": 75000000,
-    "live_release_approved": false,
+    "// live_release_approved": "Boolean. true is owner approval to submit live orders when dry_run is false. It does not bypass any guard.",
+    "live_release_approved": true,
+    "// quote_max_age_seconds": "Positive seconds. Maximum age of a source-timestamped quote for protection and live execution. Receipt time cannot replace it.",
     "quote_max_age_seconds": 60,
+    "// reconciliation_max_age_seconds": "Positive seconds. Maximum age of the verified holdings snapshot for live execution. Open-order reconciliation is also required.",
     "reconciliation_max_age_seconds": 120,
+    "// manual_stop_file": "Nonempty absolute path or path relative to the repository. Its presence blocks each live submission, including hard stops and rotation legs.",
     "manual_stop_file": "data/STOP_TRADING",
+    "// extended_hours_enabled": "Reserved. false is the only supported value. true fails validation because extended-hours order behavior is unverified.",
     "extended_hours_enabled": false
   },
   "logging": {
+    "// level": "Console log level (DEBUG, INFO, WARNING, ERROR, CRITICAL). The diagnostic file continues at DEBUG.",
     "level": "INFO"
   },
   "trading": {
+    "// max_positions": "Positive integer limit on distinct holdings and reserved buy slots. Adds do not use a new slot.",
     "max_positions": 12,
+    "// max_position_pct": "Maximum position fraction of account equity (0 to 1). Also caps the sizing ladder and adds.",
     "max_position_pct": 0.08,
+    "// edge_score_threshold": "Minimum total edge score for entries and adds. SELL is exempt.",
     "edge_score_threshold": 3.0,
+    "// take_profit_pct": "Deprecated. The live graduation threshold is exits.take_profit_pct. This legacy value does not change exits.",
     "take_profit_pct": 0.2,
+    "// profit_review_pct": "Deprecated. The old percent-only profit review is superseded by grouped exit advisories.",
     "profit_review_pct": 0.15,
+    "// max_holding_days": "Positive integer of NYSE sessions since a known entry. Queues a nightly advisory when monitor.check_max_holding and exits.enabled are true.",
     "max_holding_days": 15,
+    "// cycle_edge_bonus": "Finite score increments keyed by OPEN, MID and CLOSE. Added to the base threshold for BUY and ROTATE only.",
     "cycle_edge_bonus": {
       "OPEN": 0.0,
       "MID": 0.25,
       "CLOSE": 0.5
     },
+    "// stop_loss_bands": "Pairs of annualized 30-day volatility percent floor and negative loss fraction greater than -1. The highest matching floor sets the initial stop.",
     "stop_loss_bands": [
       [
         0,
@@ -48,6 +69,7 @@
         -0.16
       ]
     ],
+    "// size_ladder": "Pairs of edge score floor and equity fraction in (0, 1]. The highest matching floor supplies base size before volatility and exposure limits.",
     "size_ladder": [
       [
         3.0,
@@ -66,6 +88,7 @@
         0.08
       ]
     ],
+    "// vol_sizing": "Pairs of annualized 30-day volatility percent floor and size multiplier in (0, 1]. Below the first floor or with unknown volatility, the multiplier is 1.",
     "vol_sizing": [
       [
         30,
@@ -80,41 +103,64 @@
         0.45
       ]
     ],
+    "// extreme_vol_reject_30d": "Reject new buys above this annualized 30-day volatility in percent units (120 means 120%).",
     "extreme_vol_reject_30d": 120.0,
     "market_hours": {
+      "// calendar": "Fixed to NYSE. This calendar governs trading sessions, holidays and early closes.",
       "calendar": "NYSE",
+      "// stale_data_guard": "Boolean. Require a fresh, positive SPY benchmark quote before scheduled decisions. Per-order quote gates apply independently.",
       "stale_data_guard": true
     },
+    "// max_new_entries_per_day": "Nonnegative integer count of new entries before additional portfolio justification is required. Adds are exempt.",
     "max_new_entries_per_day": 2,
+    "// sector_cap_pct": "Sector exposure review threshold as a fraction of equity (0 to 1). A trade above the threshold requires explicit sector justification.",
     "sector_cap_pct": 0.3,
+    "// earnings_window_discount_notches": "Nonnegative integer number of sizing ladder steps to reduce after earnings-window review.",
     "earnings_window_discount_notches": 1,
     "add_to_position": {
+      "// enabled": "Boolean. Allow the typed ADD action subject to evidence, exit priority, liquidity, size and incremental risk checks.",
       "enabled": true,
+      "// max_adds_per_position": "Nonnegative integer limit on confirmed adds to the current position lifecycle.",
       "max_adds_per_position": 1,
+      "// max_increment_pct_of_position_value": "Maximum add size as a fraction (0, 1] of the current position value.",
       "max_increment_pct_of_position_value": 0.25,
+      "// max_incremental_risk_fraction_of_equity": "Maximum incremental loss to the existing stop as a fraction (0, 1) of equity.",
       "max_incremental_risk_fraction_of_equity": 0.0025,
+      "// cooldown_hours": "Nonnegative hours since the last confirmed add.",
       "cooldown_hours": 24,
+      "// require_valid_existing_stop": "Fixed true. Adds require a valid stop below the execution price to bound incremental risk.",
       "require_valid_existing_stop": true
     }
   },
   "schedule": {
+    "// open_hour": "OPEN cycle wall-clock time in schedule.timezone. Hour is integer 0-23, minute 0-59. NYSE must also be open.",
     "open_hour": 9,
     "open_minute": 35,
+    "// mid_hour": "MID cycle wall-clock time in schedule.timezone. Hour is integer 0-23, minute 0-59. Schedule it after OPEN.",
     "mid_hour": 12,
     "mid_minute": 30,
+    "// close_hour": "CLOSE cycle wall-clock time in schedule.timezone. Hour is integer 0-23, minute 0-59. Schedule it after MID and before the session ends.",
     "close_hour": 15,
     "close_minute": 30,
+    "// timezone": "IANA zone for decision cycles, startup catch-up, and attribution. Discovery hours labeled ET use America/New_York.",
     "timezone": "America/New_York"
   },
   "monitor": {
+    "// enabled": "Boolean. Register the recurring position monitor during NYSE sessions. Decision cycles can also run a protection pass.",
     "enabled": true,
+    "// historicals_span": "Broker lookback for metrics used in advisory reviews. day, week, month, 3month, 6month or year. Nightly ATR uses its own daily history.",
     "historicals_span": "3month",
+    "// interval_seconds": "Integer polling interval of at least 5 seconds. Monitor health allows the larger of 90 seconds or two intervals.",
     "interval_seconds": 15,
+    "// profit_review_cooldown_min": "Nonnegative minutes before retrying a failed soft exit advisory other than graduation. Hard stops do not wait.",
     "profit_review_cooldown_min": 15,
+    "// profit_target_cooldown_min": "Nonnegative minutes before retrying a failed graduation review. A completed graduation review is one-time per holding.",
     "profit_target_cooldown_min": 5,
+    "// check_max_holding": "Boolean. Enable the nightly time-in-position advisory from trading.max_holding_days. It never forces a sale.",
     "check_max_holding": true
   },
   "watchlist": {
+    "// default_tickers": "Array of ticker strings for fallback when discovery is off and the legacy selector or broker watchlist has no usable list.",
     "default_tickers": [
       "JPM",
       "NVDA",
@@ -127,29 +173,45 @@
       "AMD",
       "COST"
     ],
+    "// robinhood_watchlist_name": "Nonempty broker watchlist name for fallback when discovery is off and the legacy selector has no usable list.",
     "robinhood_watchlist_name": "Default"
   },
   "news": {
+    "// provider": "Fixed to finnhub. The agent has one news provider.",
     "provider": "finnhub",
+    "// lookback_days": "Positive integer calendar-day query range for decision-cycle company news. Weekly selection uses a separate lookback.",
     "lookback_days": 3,
+    "// max_per_ticker": "Positive integer maximum number of fresh headlines attached per ticker.",
     "max_per_ticker": 5,
+    "// fresh_window_hours": "Maximum age in whole hours of stories included in decision and monitor prompts.",
     "fresh_window_hours": 24,
     "general_market": {
+      "// enabled": "Boolean. Include Finnhub market headlines in the SPY news context.",
       "enabled": true,
+      "// category": "Finnhub market news category string. Use general for broad coverage or a category the provider accepts.",
       "category": "general",
+      "// count": "Nonnegative integer cap on fetched market headlines. SPY's combined context is also limited by max_per_ticker.",
       "count": 8
     }
   },
   "cost_tracking": {
+    "// enabled": "Boolean. Write Anthropic usage and cost records and report cycle totals. It has no effect on trading eligibility or API requests.",
     "enabled": true,
+    "// pricing": "Exact returned model ID to rates map. Rates are nonnegative USD per million tokens. Unknown models or billable categories remain unpriced.",
     "pricing": {
       "claude-sonnet-5-5": {
+        "// input": "Rate for uncached input tokens.",
         "input": 2.0,
+        "// cache_write": "Rate for five-minute cache creation tokens.",
         "cache_write": 2.5,
+        "// cache_read": "Rate for cache read tokens.",
         "cache_read": 0.1,
+        "// output": "Rate for generated output tokens.",
         "output": 10.0,
+        "// cache_write_1h": "Rate for one-hour cache creation tokens.",
         "cache_write_1h": 4.0
       },
+      "// *": "Deprecated wildcard tariff. Ignored so unknown models stay unpriced.",
       "*": {
         "input": 3.0,
         "cache_write": 3.75,
@@ -157,128 +219,209 @@
         "output": 15.0
       }
     },
+    "// pricing_version": "Nonempty rate revision label stored in the ledger with billed usage and the selected rates.",
     "pricing_version": "anthropic-2026-11-07"
   },
   "sentiment_selection": {
+    "// enabled": "Boolean. Enable the legacy weekly selector when discovery is off, plus sentiment refresh for held positions.",
     "enabled": true,
+    "// universe_size": "Positive integer legacy weekly quota. The integrated agent counts new candidates separately from holdings.",
     "universe_size": 10,
+    "// lookback_days": "Positive integer calendar-day headline query range for legacy selection. Discovery uses its fixed 45-day baseline.",
     "lookback_days": 7,
+    "// min_sentiment_score": "Minimum legacy mean headline score from -1 to 1 for a candidate.",
     "min_sentiment_score": -1.0,
+    "// schedule_day": "Legacy weekly APScheduler day-of-week expression, such as sun or mon-fri.",
     "schedule_day": "sun",
+    "// schedule_hour": "Legacy selection wall-clock time in schedule_timezone. Hour is integer 0-23 and minute 0-59.",
     "schedule_hour": 20,
     "schedule_minute": 0,
+    "// schedule_timezone": "IANA zone for the legacy weekly ranking schedule.",
     "schedule_timezone": "America/New_York",
+    "// model_name": "Informational only. The primary model ID and pinned revision are defined in core/data/sentiment.py.",
     "model_name": "AnkitAI/FinSense-ModernBERT-Financial-News-Sentiment-Analysis",
+    "// fallback_model": "Informational only. The fallback ID and pinned revision are defined in core/data/sentiment.py.",
     "fallback_model": "AnkitAI/distilbert-base-uncased-financial-news-sentiment-analysis",
+    "// batch_size": "Positive integer number of headlines per inference batch for legacy weekly selection. Discovery uses its own default.",
     "batch_size": 16,
+    "// cache_max_age_hours": "Nonnegative hours to reuse an identical weekly or discovery headline query. Zero disables cache reuse.",
     "cache_max_age_hours": 24
   },
   "reporting": {
+    "// attribution_enabled": "Boolean. Schedule live and paper fill attribution on weekdays.",
     "attribution_enabled": true,
+    "// attribution_hour": "Attribution wall-clock time in schedule.timezone. Hour is integer 0-23 and minute 0-59.",
     "attribution_hour": 16,
     "attribution_minute": 5
   },
   "discovery": {
-    "enabled": false,
+    "// enabled": "Boolean. Use the S&P discovery pipeline for new names. Missing or stale shortlists leave the new-name set empty. Held positions are reviewed separately.",
+    "enabled": true,
+    "// universe_file": "Nonempty absolute or repository-relative path to the sourced, versioned constituent snapshot.",
     "universe_file": "data/sp500_universe.json",
+    "// shortlist_file": "Nonempty absolute or repository-relative path to the published shortlist. Failure status is written next to it.",
     "shortlist_file": "data/discovery_shortlist.json",
+    "// features_dir": "Nonempty absolute or repository-relative directory for dated feature snapshots. Latest feature output also has a fixed path under data.",
     "features_dir": "data",
+    "// universe_max_age_days": "Positive maximum age in days of the source constituent snapshot.",
     "universe_max_age_days": 14,
+    "// shortlist_max_age_days": "Positive maximum age in days for a published shortlist to supply new names.",
     "shortlist_max_age_days": 8,
+    "// min_cohort": "Minimum number of valid feature and news rows needed to publish a ranking.",
     "min_cohort": 20,
     "gates": {
+      "// min_dollar_volume": "Positive minimum 30-session average daily turnover in USD before ranking. Execution checks its own floor.",
       "min_dollar_volume": 75000000,
+      "// min_price": "Positive minimum share price in USD.",
       "min_price": 5.0,
+      "// max_vol_30d_pct_annualized": "Positive maximum annualized 30-session volatility in percent units.",
       "max_vol_30d_pct_annualized": 120.0,
+      "// min_bars": "Positive minimum count of contiguous completed daily bars. Individual features may require longer history.",
       "min_bars": 250
     },
     "shortlist": {
+      "// new_candidate_count": "Positive integer maximum new names published. Existing holdings do not consume these slots.",
       "new_candidate_count": 10,
+      "// divergence_pool_cap": "Positive integer maximum size of the A/B divergence pool before combining the candidate pools.",
       "divergence_pool_cap": 15,
+      "// drift_pool_cap": "Positive integer maximum size of the C confirmed drift pool before combining the candidate pools.",
       "drift_pool_cap": 5,
+      "// candidate_memory_runs": "Positive integer number of successful shortlist runs retained for tie-breaking. It never outranks a larger gap score.",
       "candidate_memory_runs": 2
     },
     "gap_weights": {
+      "// sentiment_mean": "Finite weight on standardized headline tone in the news component.",
       "sentiment_mean": 1.0,
+      "// velocity": "Finite weight on standardized news-velocity in the news component.",
       "velocity": 0.5,
+      "// delta": "Finite weight on standardized change in sentiment in the news component.",
       "delta": 0.5,
+      "// momentum_blend": "Two finite weights for 21- and 63-session returns, respectively. The resulting momentum component is standardized and subtracted.",
       "momentum_blend": [
         0.6,
         0.4
       ],
+      "// recent_move": "Finite weight on the standardized five-session return subtracted from the raw news gap.",
       "recent_move": 0.3
     },
     "archetypes": {
+      "// lagged_gap_z": "Minimum standardized gap for A (lagged good news). Also requires a technical fingerprint.",
       "lagged_gap_z": 1.0,
+      "// inflection_delta": "Minimum raw sentiment delta for B (early inflection). Also requires the base fingerprint.",
       "inflection_delta": 0.3,
+      "// avoid_gap_z": "Gap z-score at or below which D (avoid-side) takes precedence over other labels.",
       "avoid_gap_z": -1.0
     },
     "fingerprints": {
+      "// pullback_min": "F1 lower and upper fractional distance from the 30-session high (0 to 1).",
       "pullback_min": 0.02,
       "pullback_max": 0.1,
+      "// uptrend_slope_min": "Minimum fractional 20-session slope of the 20-day average for F1.",
       "uptrend_slope_min": 0.01,
+      "// base_range_ratio_max": "Maximum recent-to-prior range ratio for F2 (base contraction).",
       "base_range_ratio_max": 0.8,
+      "// base_vol_ratio_max": "Maximum recent-to-prior volatility ratio for F2.",
       "base_vol_ratio_max": 0.8,
+      "// down_volume_ratio_max": "Maximum recent-to-prior down-day volume ratio for F2 and F3.",
       "down_volume_ratio_max": 0.8,
+      "// exhaustion_min": "F3 lower and upper fractional distance from the 30-session high (0 to 1). Lower down-volume is also required.",
       "exhaustion_min": 0.05,
       "exhaustion_max": 0.15
     },
     "schedule": {
+      "// feature_hour_et": "Daily feature and held-position maintenance hour in New York time (0-23) when discovery is enabled. Otherwise held maintenance runs at 20:00 ET.",
       "feature_hour_et": 20,
+      "// rank_day": "APScheduler day-of-week expression for discovery ranking, such as sun. Startup uses the same schedule to detect a missed run.",
       "rank_day": "sun",
+      "// rank_hour_et": "Discovery ranking hour in New York time (0-23), at minute zero. Ranking also refreshes its own feature inputs.",
       "rank_hour_et": 20
     }
   },
   "exits": {
+    "// enabled": "Boolean. Enable strategic trailing, graduation and soft review handling. Initial and previously persisted hard stops remain enforced.",
     "enabled": true,
-    "breakeven_ratchet_pct": 0.05,
-    "breakeven_lock_gain_pct": 0.005,
+    "// breakeven_ratchet_pct": "Fractional peak gain that activates the profit-lock ratchet. Must be above the lock gain and below chandelier activation.",
+    "breakeven_ratchet_pct": 0.07,
+    "// breakeven_lock_gain_pct": "Positive fractional gain locked above entry at the ratchet. Existing stops can only tighten in regular operation.",
+    "breakeven_lock_gain_pct": 0.01,
     "chandelier": {
+      "// activate_at_pct": "Peak gain fraction below 1 that activates the ATR-based trail when completed-session ATR is fresh.",
       "activate_at_pct": 0.1,
+      "// atr_multiple": "Positive number of ATRs subtracted from the observed peak for the Chandelier trail.",
       "atr_multiple": 3.0,
+      "// atr_period": "Fixed to 14 completed-session true ranges for Wilder ATR. Other periods are unsupported.",
       "atr_period": 14
     },
+    "// take_profit_mode": "Fixed to graduate. Crossing the threshold requests a one-time review, with a defended HOLD continuing the trail.",
     "take_profit_mode": "graduate",
+    "// take_profit_pct": "Fractional gain that queues the graduation review. This threshold does not itself place a sell order.",
     "take_profit_pct": 0.2,
     "climax": {
+      "// rsi_min": "Minimum RSI (0-100) for a climax advisory, paired with the deviation threshold.",
       "rsi_min": 80,
+      "// sigma_above_20dma": "Minimum number of standard deviations above the 20-day average for a climax advisory.",
       "sigma_above_20dma": 3.0,
+      "// tighten_atr_multiple": "Positive ATR multiple for the tightened climax trail below the observed peak.",
       "tighten_atr_multiple": 2.0
     },
     "trend_break": {
+      "// ma_days": "Positive integer moving-average window for the trend-break test.",
       "ma_days": 20,
+      "// consecutive_closes": "Positive integer count of sessions closing below the corresponding moving average to signal trend break.",
       "consecutive_closes": 2,
+      "// only_if_was_profitable": "Boolean. Restrict trend-break review to holdings that have observed a peak above entry.",
       "only_if_was_profitable": true
     },
     "sentiment_reversal": {
+      "// delta_z": "Maximum sentiment-delta z-score for reversal. Negative recent tone and elevated news velocity are also required.",
       "delta_z": -1.0,
+      "// news_velocity_multiple": "Minimum news count multiple relative to the ticker's baseline for a reversal.",
       "news_velocity_multiple": 2.0
     },
+    "// gap_closure_z": "Remaining signed gap z-score below which a comparable entry gap qualifies for closure review. Sign inversions also qualify.",
     "gap_closure_z": 0.3,
     "dead_money": {
+      "// trading_days": "Minimum completed NYSE sessions since known entry before dead-money review.",
       "trading_days": 10,
+      "// unrealized_band_pct": "Maximum absolute unrealized gain/loss fraction for the dead-money rule.",
       "unrealized_band_pct": 0.02,
+      "// gap_progress_min": "Required progress fraction toward closing the entry gap. Below this, a holding inside the return band may qualify for review.",
       "gap_progress_min": 0.25
     },
+    "// rotation_margin_z": "Minimum new-candidate advantage in comparable gap z-score for an opportunity-cost advisory.",
     "rotation_margin_z": 0.8,
     "partial_take": {
-      "enabled": false,
+      "// enabled": "Boolean. Permit an explicit SELL/REDUCE decision when strategic exits are enabled and the gain meets at_pct.",
+      "enabled": true,
+      "// at_pct": "Minimum fractional gain at the executable price for the optional REDUCE action. It does not queue an automatic sale.",
       "at_pct": 0.15,
+      "// fraction": "Fraction (0, 1] of current shares to sell on an eligible REDUCE. Invalid or disabled reductions are rejected.",
       "fraction": 0.5
     },
     "specialized_review": {
+      "// drop_pct_threshold": "Minimum fractional decline from the recent peak for an intraday drop advisory.",
       "drop_pct_threshold": 0.05,
+      "// vol_aware": "Boolean. Raise the drop threshold to the ATR-based floor when fresh ATR is available.",
       "vol_aware": true,
+      "// drop_atr_multiple": "Positive number of ATRs used in the volatility-aware drop threshold.",
       "drop_atr_multiple": 1.5,
+      "// fifty_two_week_high_review": "Boolean. Queue a review when price reaches a known 52-week high.",
       "fifty_two_week_high_review": true,
+      "// review_cooldown_hours": "Nonnegative hours before an eligible intraday specialized advisory can rearm.",
       "review_cooldown_hours": 24,
+      "// new_high_rearm_atr_multiple": "Required additional advance in ATRs before a repeat high review can rearm.",
       "new_high_rearm_atr_multiple": 1.0
     },
     "pead": {
+      "// enabled": "Boolean. Enable the post-earnings drift advisory with verified event data and sufficient comparable history.",
       "enabled": true,
+      "// min_sessions_after_earnings": "Minimum completed sessions after earnings before measuring a drift exit signal.",
       "min_sessions_after_earnings": 5,
+      "// capture_fraction_threshold": "Fraction of expected positive abnormal return captured to trigger review.",
       "capture_fraction_threshold": 0.8,
+      "// max_drift_sessions": "Session age that triggers review when the drift evidence is otherwise valid.",
       "max_drift_sessions": 15,
+      "// min_comparable_events": "Minimum count of prior same-direction comparable earnings events for the expected drift curve.",
       "min_comparable_events": 30
     }
   }

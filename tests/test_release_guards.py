@@ -35,6 +35,51 @@ async def test_manual_stop_and_closed_market_refuse_live_orders(pm, monkeypatch)
     c.place_equity_order.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_manual_stop_is_rechecked_after_awaited_entry_checks(pm):
+    config = {"execution": {"dry_run": False, "live_release_approved": True}}
+    pm.reconcile_with_mcp(portfolio())
+    pm.orders_reconciled = True
+    client = AsyncMock()
+    engine = ExecutionEngine(client, pm, config)
+    stop = pm._path.parent.parent / "data/STOP_TRADING"
+
+    async def check_tradability(ticker):
+        stop.parent.mkdir(exist_ok=True)
+        stop.touch()
+        return {"tradeable": True}
+
+    client.get_equity_tradability.side_effect = check_tradability
+    attempt = await engine.execute(
+        decision(),
+        portfolio(),
+        100,
+        dry_run=False,
+        avg_volume_30d=1e6,
+        quote_timestamp=datetime.now(UTC).isoformat(),
+    )
+    assert attempt.status == "REJECTED_MANUAL_STOP"
+    assert not pm.pending("ABC")
+    client.place_equity_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execution_dry_run_overrides_legacy_live_mode(pm):
+    config = {
+        "execution": {"dry_run": True, "live_release_approved": True},
+        "env": {"DRY_RUN": False},
+    }
+    client = AsyncMock()
+    client.get_equity_tradability.return_value = {"tradeable": True}
+    engine = ExecutionEngine(client, pm, config)
+    attempt = await engine.execute(
+        decision(), portfolio(), 100, dry_run=False, avg_volume_30d=1e6
+    )
+    assert attempt.status == "WOULD_EXECUTE"
+    client.review_equity_order.assert_awaited_once()
+    client.place_equity_order.assert_not_called()
+
+
 def test_missing_calendar_fails_closed(monkeypatch):
     import utils.market_calendar as calendar
 
@@ -48,6 +93,7 @@ def test_nyse_holiday_and_half_day():
     assert not is_market_open_at(datetime(2026, 1, 1, 16, tzinfo=UTC))
     assert not is_market_open_at(datetime(2026, 11, 26, 16, tzinfo=UTC))
     assert is_market_open_at(datetime(2026, 11, 27, 17, 59, tzinfo=UTC))
+    assert not is_market_open_at(datetime(2026, 11, 27, 18, tzinfo=UTC))
     assert not is_market_open_at(datetime(2026, 11, 27, 18, 1, tzinfo=UTC))
 
 

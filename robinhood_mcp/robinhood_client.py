@@ -871,16 +871,13 @@ class RobinhoodMCPClient:
         content = await self._call_tool_with_retry("get_equity_tradability", args)
         parsed = self._extract_json_payload(content)
 
-        if isinstance(parsed, dict):
-            results = parsed.get("data", {}).get("results", [])
-            if isinstance(results, list) and results:
-                for item in results:
-                    if (
-                        isinstance(item, dict)
-                        and item.get("symbol", "").upper() == ticker.upper()
-                    ):
-                        return item
-                return results[0] if isinstance(results[0], dict) else {}
+        data = parsed.get("data") if isinstance(parsed, dict) else None
+        results = data.get("results") if isinstance(data, dict) else None
+        if isinstance(results, list):
+            for item in results:
+                symbol = item.get("symbol") if isinstance(item, dict) else None
+                if isinstance(symbol, str) and symbol.upper() == ticker.upper():
+                    return item
         return {}
 
     async def _resolve_watchlist_id(self, watchlist_name: str) -> str:

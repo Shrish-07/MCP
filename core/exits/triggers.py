@@ -327,7 +327,11 @@ def nightly_signals(
             "reference": news["gap_reference"],
             "interpretation": "ranking proxy only; reasoned two-leg thesis required",
         }
-    if age is not None and age >= settings["trading"].get("max_holding_days", 15):
+    if (
+        settings.get("monitor", {}).get("check_max_holding", True)
+        and age is not None
+        and age >= settings["trading"].get("max_holding_days", 15)
+    ):
         signals["TIME_ADVISORY"] = {"trading_sessions": age, "automatic_exit": False}
     for kind, evidence in signals.items():
         queue_review(record, kind, evidence, now=now, rearm=True)

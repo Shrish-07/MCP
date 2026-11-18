@@ -27,9 +27,9 @@
     "get_equity_tax_lots": { "category": "equities", "account_scoped": true, "used_by_agent": false, "purpose": "Per-lot tax lots for a holding." },
 
     "get_equity_positions": { "category": "positions-equities", "account_scoped": true, "used_by_agent": true, "purpose": "Live per-symbol holdings (merged into Portfolio.positions; reconciliation source)." },
-    "get_equity_orders": { "category": "positions-equities", "account_scoped": true, "used_by_agent": false, "purpose": "Equity order history." },
+    "get_equity_orders": { "category": "positions-equities", "account_scoped": true, "used_by_agent": true, "purpose": "Paginated equity orders for live reconciliation." },
     "review_equity_order": { "category": "trading-equities", "account_scoped": true, "used_by_agent": true, "purpose": "Pre-order preview; doubles as the dry-run 'order' (never places)." },
-    "place_equity_order": { "category": "trading-equities", "account_scoped": true, "used_by_agent": true, "purpose": "LIVE order placement — only reached after every risk gate passes and execution.dry_run=false." },
+    "place_equity_order": { "category": "trading-equities", "account_scoped": true, "used_by_agent": true, "purpose": "Live order placement after dry_run=false, live_release_approved=true and runtime order checks." },
     "cancel_equity_order": { "category": "trading-equities", "account_scoped": true, "used_by_agent": false, "purpose": "Cancel a live equity order (agent is market-order only)." },
     "get_option_chains": { "category": "options", "account_scoped": false, "used_by_agent": false, "purpose": "Option chain listing (equities-only agent today)." },
     "get_option_instruments": { "category": "options", "account_scoped": false, "used_by_agent": false, "purpose": "Option instrument metadata." },

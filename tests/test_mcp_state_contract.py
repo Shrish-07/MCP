@@ -27,6 +27,14 @@ async def test_empty_positions_explicit_success():
     assert await c.get_equity_positions() == []
 
 
+@pytest.mark.asyncio
+async def test_tradability_requires_a_matching_broker_symbol():
+    c = client({"data": {"results": [{"symbol": "OTHER", "tradeable": True}]}})
+    assert await c.get_equity_tradability("ABC") == {}
+    c = client({"data": {"results": [{"symbol": "abc", "tradeable": False}]}})
+    assert (await c.get_equity_tradability("ABC"))["tradeable"] is False
+
+
 @pytest.mark.parametrize(
     "payload",
     [

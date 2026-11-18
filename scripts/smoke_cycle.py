@@ -1,6 +1,6 @@
 """One-shot smoke test: run a single full trading cycle against live APIs
 (Robinhood MCP + Finnhub + Anthropic) in whatever mode settings.json says
-(ships dry-run). Writes everything to logs/agent.log via configure_logging().
+and under the same instance lock as the scheduler.
 """
 
 from __future__ import annotations
@@ -17,9 +17,8 @@ if str(_REPO_ROOT) not in sys.path:
 
 import main as m
 from models.decisions import CycleType
+from utils.instance_lock import InstanceLock
 from utils.logger import configure_logging
-
-BUDGET_TOP_SOURCE = "claude-sonnet-5-5"
 
 
 async def _go() -> int:
@@ -41,9 +40,8 @@ async def _go() -> int:
     print("SMOKE: cycle completed cleanly")
     # cheap sanity views (no prints of secrets)
     import json
-    from pathlib import Path
 
-    trades = Path("logs/trades.json")
+    trades = _REPO_ROOT / "logs/trades.json"
     if trades.exists():
         data = json.loads(trades.read_text(encoding="utf-8"))
         newest = data[-6:] if len(data) >= 6 else data
@@ -61,5 +59,6 @@ async def _go() -> int:
 
 
 if __name__ == "__main__":
-    configure_logging()
-    sys.exit(asyncio.run(_go()))
+    with InstanceLock(_REPO_ROOT / "logs/agent.lock"):
+        configure_logging()
+        sys.exit(asyncio.run(_go()))

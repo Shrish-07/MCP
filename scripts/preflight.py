@@ -14,7 +14,15 @@ from utils.persistence import atomic_json
 
 def preflight(root=None):
     root = Path(root) if root else Path(__file__).resolve().parents[1]
-    config = load_config(include_secrets=False)
+    config = load_config(include_secrets=False, root=root)
+    # Invalid settings are still reported without passing them into state readers.
+    if config["configuration_errors"]:
+        return {
+            "configuration_errors": config["configuration_errors"],
+            "dry_run": True,
+            "local_validation_passed": False,
+            "live_ready": False,
+        }
     manager = PositionManager(root / "logs/positions.json", config)
     state = manager.snapshot()
     dependencies = all(

@@ -13,6 +13,10 @@ from utils.freshness import fresh_timestamp
 from utils.persistence import atomic_json
 
 
+def monitor_max_age(interval_seconds):
+    return max(90, 2 * interval_seconds)
+
+
 def _process_matches(pid, created):
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
         return False
@@ -72,8 +76,12 @@ def inspect_health(path, *, now=None, market_open=None, process_probe=None):
             "STATE_RECONCILIATION_FAILED", "No successful broker reconciliation"
         )
     market_open = is_market_open_at(now) if market_open is None else market_open
+    monitor = state.get("monitor", {})
+    interval = monitor.get("interval_seconds", 15)
+    if type(interval) is not int or interval < 5:
+        return result("STATE_RECONCILIATION_FAILED", "Invalid monitor interval")
     if market_open and not fresh_timestamp(
-        state.get("monitor", {}).get("last_success"), 90, now
+        monitor.get("last_success"), monitor_max_age(interval), now
     ):
         return result("PROCESS_STALE", "Protection monitor is stale")
     if market_open and state.get("quotes", {}).get("error"):

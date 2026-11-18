@@ -1,7 +1,6 @@
 """Local L0–L6 orchestration. No paid-model call can occur in this pipeline."""
 
 import asyncio
-import json
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,7 +12,7 @@ from .divergence import score_cohort
 from .features import technical_features
 from .gates import eligibility
 from .news_features import NewsHistory, deduplicate
-from .shortlist import mark_failed, publish, select_new
+from .shortlist import mark_failed, prior_history, publish, select_new
 from .universe import load_universe, refresh
 
 
@@ -151,7 +150,6 @@ class Discovery:
                 raise ValueError("insufficient valid news cohort")
             reference = "cross-sectional-v1:" + now.isoformat()
             ranked = score_cohort(rows, self.cfg, reference)
-            previous = json.loads(self.path.read_text()) if self.path.exists() else {}
             held = (
                 [r.ticker for r in self.pm.get_open_records()]
                 if self.pm.reconciliation_ok
@@ -162,7 +160,7 @@ class Discovery:
                     "holdings reconciliation required for new-name exclusion"
                 )
             candidates = select_new(
-                ranked, held, self.cfg["shortlist"], previous.get("history", [])
+                ranked, held, self.cfg["shortlist"], prior_history(self.path)
             )
             metadata = {
                 "data_cutoff": min(r["data_cutoff"] for r in ranked.values()),
@@ -174,7 +172,12 @@ class Discovery:
                 "excluded": features["excluded"],
                 "all_ranked": ranked,
             }
-            result = publish(self.path, candidates, metadata)
+            result = publish(
+                self.path,
+                candidates,
+                metadata,
+                candidate_memory_runs=self.cfg["shortlist"]["candidate_memory_runs"],
+            )
             atomic_json(self.root / "data/discovery_ranked_latest.json", result)
             return result
         except Exception as exc:

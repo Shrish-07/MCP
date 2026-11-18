@@ -140,6 +140,25 @@ class ExecutionEngine:
             return self._edge_threshold + bonus
         return self._edge_threshold
 
+    def _live_submission_block(self):
+        execution = self.settings.get("execution", {})
+        stop_file = self.position_manager._path.parent.parent / execution.get(
+            "manual_stop_file", "data/STOP_TRADING"
+        )
+        try:
+            stop_file.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return "REJECTED_MANUAL_STOP_UNAVAILABLE"
+        else:
+            return "REJECTED_MANUAL_STOP"
+        if not is_market_open_at():
+            return "REJECTED_MARKET_CLOSED"
+        if execution.get("live_release_approved") is not True:
+            return "REJECTED_LIVE_RELEASE_GATE"
+        return None
+
     def _get_open_position_count(self) -> int:
         """positions.json (via PositionManager) is the single source of truth."""
         held = {r.ticker for r in self.position_manager.get_open_records()}
@@ -152,6 +171,7 @@ class ExecutionEngine:
                 "CREATED",
                 "SUBMITTED",
                 "PARTIALLY_FILLED",
+                "CANCEL_REQUESTED",
                 "UNKNOWN_REQUIRES_RECONCILIATION",
             )
         )
@@ -225,9 +245,7 @@ class ExecutionEngine:
         ):
             return self._result(decision, "REJECTED_MAX_POSITIONS", dry_run, "buy")
 
-        # G4: tradability — FAIL-CLOSED by design. An errored or unparseable
-        # check must refuse the trade (the very failure mode this gate guards
-        # is an API that can no longer answer correctly).
+        # The default fails closed on errored or unverified tradability.
         try:
             tradability = await self.client.get_equity_tradability(ticker)
         except Exception as exc:
@@ -241,19 +259,17 @@ class ExecutionEngine:
                 return self._result(
                     decision, "REJECTED_TRADABILITY_UNKNOWN", dry_run, "buy"
                 )
-            tradability = {"tradeable": None}
-        if not isinstance(tradability, dict) or "tradeable" not in tradability:
-            if self._fail_closed:
-                self.logger.error(
-                    "tradability_unparseable ticker=%s raw=%s — refusing trade (fail-closed)",
-                    ticker,
-                    tradability,
-                )
-                return self._result(
-                    decision, "REJECTED_TRADABILITY_UNKNOWN", dry_run, "buy"
-                )
-        elif tradability.get("tradeable") is False:
+            tradability = None
+        tradeable = (
+            tradability.get("tradeable") if isinstance(tradability, dict) else None
+        )
+        if tradeable is False:
             return self._result(decision, "REJECTED_UNTRADEABLE", dry_run, "buy")
+        if tradeable is not True and self._fail_closed:
+            self.logger.warning("tradability_unverified ticker=%s", ticker)
+            return self._result(
+                decision, "REJECTED_TRADABILITY_UNKNOWN", dry_run, "buy"
+            )
 
         # G5: liquidity floor (30d average dollar volume).
         dollar_volume = float(avg_volume_30d or 0.0) * float(current_price or 0.0)
@@ -381,9 +397,16 @@ class ExecutionEngine:
         quote_timestamp,
     ):
         """Execute or simulate a decision after validating all risk gates."""
-        effective_dry_run = bool(
-            self.settings.get("env", {}).get("DRY_RUN", True)
-        ) or bool(dry_run)
+        execution = self.settings.get("execution", {})
+        legacy_mode = self.settings.get("env", {}).get(
+            "DRY_RUN", execution.get("dry_run", True)
+        )
+        configured_mode = execution.get("dry_run", legacy_mode)
+        effective_dry_run = (
+            configured_mode is not False
+            or legacy_mode is not False
+            or dry_run is not False
+        )
 
         try:
             # ---- No-op decisions ----
@@ -414,21 +437,9 @@ class ExecutionEngine:
             if not math.isfinite(current_price) or current_price <= 0:
                 return self._result(decision, "REJECTED_NO_PRICE", effective_dry_run)
             if not effective_dry_run:
-                stop_file = (
-                    self.position_manager._path.parent.parent
-                    / self.settings.get("execution", {}).get(
-                        "manual_stop_file", "data/STOP_TRADING"
-                    )
-                )
-                if stop_file.exists():
-                    return self._result(decision, "REJECTED_MANUAL_STOP", False)
-                if not is_market_open_at():
-                    return self._result(decision, "REJECTED_MARKET_CLOSED", False)
-                if (
-                    self.settings.get("execution", {}).get("live_release_approved")
-                    is not True
-                ):
-                    return self._result(decision, "REJECTED_LIVE_RELEASE_GATE", False)
+                block = self._live_submission_block()
+                if block:
+                    return self._result(decision, block, False)
                 ready = (
                     (
                         self.position_manager.broker_ready
@@ -556,11 +567,21 @@ class ExecutionEngine:
         sell_record: PositionRecord,
         log_trade: bool = True,
     ) -> ExecutionResult:
-        """Sell the full position behind sell_record. Records realized P&L and
-        exits the record on success. Never blocked by anything except reality."""
+        """Submit a close or an explicitly allowed partial take."""
         quantity = float(sell_record.quantity or 0.0)
-        partial = self.settings.get("exits", {}).get("partial_take", {})
-        if decision.action_type == "REDUCE" and partial.get("enabled", False):
+        exits = self.settings.get("exits", {})
+        partial = exits.get("partial_take", {})
+        if decision.action_type == "REDUCE":
+            if not exits.get("enabled", True) or not partial.get("enabled", False):
+                return self._result(
+                    decision, "REJECTED_PARTIAL_TAKE_DISABLED", dry_run, "sell"
+                )
+            if current_price + 1e-9 < sell_record.entry_price * (
+                1 + partial.get("at_pct", 0.15)
+            ):
+                return self._result(
+                    decision, "REJECTED_PARTIAL_TAKE_THRESHOLD", dry_run, "sell"
+                )
             fraction = float(partial.get("fraction", 0.5))
             if not 0 < fraction <= 1:
                 return self._result(decision, "REJECTED_QUANTITY", dry_run, "sell")
@@ -671,6 +692,9 @@ class ExecutionEngine:
             return self._result(
                 decision, "WOULD_EXECUTE", True, side, quantity=quantity
             )
+        block = self._live_submission_block()
+        if block:
+            return self._result(decision, block, False, side)
         pm = self.position_manager
         key = pm.create_order(decision, side, quantity, price, vol)
         placed = None

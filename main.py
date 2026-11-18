@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import math
 import signal as process_signal
 from contextlib import suppress
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, time
 from pathlib import Path
 
 import pytz
@@ -17,7 +17,8 @@ from core.data.metrics import MetricsEngine
 from core.data.news import NewsFetcher
 from core.decision.engine import DecisionEngine
 from core.execution.engine import ExecutionEngine
-from core.position.manager import ExitSignal, PositionManager, position_snapshot
+from core.exits.trail_manager import executable_mark
+from core.position.manager import ExitSignal, PositionManager
 from core.position.pnl_tracker import PnLTracker
 from core.weekly.selector import WeeklySelector, get_weekly_selector
 from models.decisions import (
@@ -25,12 +26,9 @@ from models.decisions import (
     CycleType,
     DecisionType,
     JournalEntry,
-    StructuredEdgeScore,
-    TradeDecision,
 )
 from models.market_data import MarketMetrics
 from models.news import NewsItem
-from models.portfolio import Portfolio, PositionRecord
 from robinhood_mcp.robinhood_client import RobinhoodMCPClient
 from utils.anthropic_client import AnthropicClient
 from utils.config import load_config
@@ -40,61 +38,6 @@ from utils.journal_manager import JournalManager
 from utils.logger import configure_logging
 from utils.market_calendar import is_market_open_at
 
-# Canonical exit-review rubric now lives in models.decisions (shared with
-# core/decision/engine.py) — imported above as EXIT_REVIEW_RULES.
-
-
-# Compact monitor-only system prompt for the 1-minute threshold path (~300 tokens).
-# Replaces the long DecisionEngine system prompt on monitor complete() calls so
-# repeated STOP_LOSS / PROFIT_TARGET / PROFIT_REVIEW reviews bill far less input.
-_MONITOR_SYSTEM_PROMPT_TEXT = """\
-You are reviewing an EXISTING open equity position after a price threshold fired.
-Your only job: decide HOLD or SELL for this one ticker. Do not recommend BUY, IGNORE, or ROTATE.
-
-Always ground reasoning in entry price vs current price and unrealized P&L %.
-SELL requires explicit evidence (thesis broken, technical failure vs plan, or capital better deployed).
-HOLD is valid when the thesis still holds and the move is noise or still unfolding.
-
-For EXIT decisions, score edge as EXIT CONVICTION (not buy quality):
-- catalyst_strength (0-2): strength of the exit reason
-- technical_confirmation (0-2): price action supports exit
-- portfolio_fit (0-1): value of freeing capital / cutting risk
-Code will sum these for observability; SELL does not use an entry-score gate.
-STOP_LOSS is a hard risk rule: decision must be SELL.
-
-Earnings proximity is informational only — not an automatic SELL.
-Cite only metrics present in the user message. Do not invent numbers.
-
-Return ONLY valid JSON (no markdown):
-{
-  "bull_thesis": "string",
-  "bear_thesis": "string",
-  "failure_conditions": ["string"],
-  "decision": "HOLD|SELL",
-  "action_type": "NONE|CLOSE",
-  "rotate_from_ticker": null,
-  "edge": {"catalyst_strength": 0.0, "technical_confirmation": 0.0, "portfolio_fit": 0.0},
-  "risk_notes": "string",
-  "reasoning_summary": "string — must mention entry vs current and unrealized %"
-}
-"""
-
-_MONITOR_SYSTEM_PROMPT = [
-    {
-        "type": "text",
-        "text": _MONITOR_SYSTEM_PROMPT_TEXT,
-        "cache_control": {"type": "ephemeral"},
-    }
-]
-
-
-# Per-ticker cooldowns for SOFT monitor signals so a stuck >=15% / >=20% gain
-# does not re-query the LLM between ticks after a HOLD. STOP_LOSS is a hard
-# risk rule and is NEVER throttled. Values come from settings.json
-# (monitor.profit_review_cooldown_min / monitor.profit_target_cooldown_min);
-# these module constants only seed fallbacks if config keys are removed,
-# and self._monitor_locks was folded into PositionManager's shared registry.
-
 
 class TradingAgent:
     """Anthropic-only trading agent orchestrating ingest, metrics, news, decisions,
@@ -103,15 +46,14 @@ class TradingAgent:
 
     def __init__(self) -> None:
         self.logger = logging.getLogger("robinhood-agent.main")
-        self.scheduler = AsyncIOScheduler(timezone="America/New_York")
-        self.config = load_config()  # settings.json is the single source of truth
+        self.config = self._load_config()
         if self.config["configuration_errors"]:
             raise ValueError("Invalid application configuration")
-        self.cost_tracker = CostTracker()
-        self.cost_tracker.set_pricing(
-            self.config.get("cost_tracking", {}).get("pricing"),
-            self.config.get("cost_tracking", {}).get("pricing_version"),
-        )
+        self.scheduler = AsyncIOScheduler(timezone=self.config["schedule"]["timezone"])
+        cost = self.config["cost_tracking"]
+        self.cost_tracker = CostTracker() if cost["enabled"] else None
+        if self.cost_tracker is not None:
+            self.cost_tracker.set_pricing(cost["pricing"], cost["pricing_version"])
         self.mcp_client = RobinhoodMCPClient(url=self.config["execution"]["mcp_url"])
         self.ingest = DataIngestLayer(self.mcp_client)
         self.metrics_engine = MetricsEngine()
@@ -129,6 +71,7 @@ class TradingAgent:
                 send_temperature=bool(
                     self.config["models"].get("send_temperature", False)
                 ),
+                cost_tracking_enabled=cost["enabled"],
             ),
             self.journal_manager,
             self.earnings_calendar,
@@ -152,22 +95,8 @@ class TradingAgent:
         # Per-ticker locks now live in PositionManager.lock_for() so cycles
         # and the monitor can never race the same holding.
         self._monitor_cache: dict[str, tuple[float, MarketMetrics, list[str]]] = {}
-        self._exit_in_progress: set[str] = set()
-        # Per-ticker last soft-signal evaluation timestamp (UTC). Used to
-        # throttle PROFIT_REVIEW / PROFIT_TARGET after a HOLD so the LLM is
-        # not re-queried every tick. STOP_LOSS ignores this entirely.
-        self._last_monitor_review: dict[str, datetime] = {}
-
-        # Config-driven monitor behaviour (settings.json → monitor.*)
-        _mon = self.config.get("monitor", {})
-        self._monitor_soft_cd = timedelta(
-            minutes=float(_mon.get("profit_review_cooldown_min", 15))
-        )
-        self._monitor_target_cd = timedelta(
-            minutes=float(_mon.get("profit_target_cooldown_min", 5))
-        )
+        _mon = self.config["monitor"]
         self._monitor_span = str(_mon.get("historicals_span", "3month"))
-        self._monitor_max_hold = bool(_mon.get("check_max_holding", True))
         self.backend = Backend(self)
 
     # ==================================================================
@@ -269,16 +198,6 @@ class TradingAgent:
             )
             return False
 
-    def _earnings_window_block(self, ticker: str) -> str:
-        try:
-            return self.earnings_calendar.earnings_window_for_prompt(ticker)
-        except Exception as error:
-            logging.getLogger(__name__).exception(
-                "Handled failure type=%s", type(error).__name__, exc_info=False
-            )
-            return ""
-
-    # ==================================================================
     #  PRICE MONITOR — config-speed loop (settings.json → monitor.*)
     # ==================================================================
 
@@ -343,155 +262,6 @@ class TradingAgent:
 
         self._monitor_cache[ticker] = (now_ts, m, nl)
         return m, nl
-
-    async def _evaluate_threshold_signal(
-        self,
-        signal: ExitSignal,
-        record: PositionRecord,
-        cycle_label: str,
-        metrics: MarketMetrics,
-        news: list[str],
-        portfolio: Portfolio,
-        spy_context: str,
-        open_positions_pnl: dict[str, float] | None = None,
-    ) -> TradeDecision:
-        """Compact re-evaluation prompt for a threshold hit (STOP_LOSS,
-        PROFIT_TARGET, PROFIT_REVIEW). STOP_LOSS returns a deterministic
-        SELL immediately without a model or optional data request.
-
-        The other two are soft — model decides HOLD vs SELL.
-        """
-        if signal.reason == "STOP_LOSS":
-            return TradeDecision(
-                ticker=signal.ticker,
-                decision=DecisionType.SELL,
-                action_type="CLOSE",
-                reasoning_summary=f"HARD_STOP price={signal.current_price} stop={record.effective_stop_px}",
-                cycle_type="MONITOR",
-                timestamp=datetime.now(UTC).isoformat(),
-            )
-        journal_block = ""
-        try:
-            journal_block = self.journal_manager.summarise_for_prompt(
-                signal.ticker, n=15
-            )
-        except Exception as error:
-            logging.getLogger(__name__).exception(
-                "Handled failure type=%s", type(error).__name__, exc_info=False
-            )
-            journal_block = ""
-
-        try:
-            days_held = (
-                datetime.now(UTC).date()
-                - datetime.fromisoformat(record.entry_date).date()
-            ).days
-        except Exception as error:
-            logging.getLogger(__name__).exception(
-                "Handled failure type=%s", type(error).__name__, exc_info=False
-            )
-            days_held = 0
-
-        unrealized_pct = signal.unrealized_pct
-
-        # One-line POSITION snapshot + EARNINGS WINDOW block + EXIT REVIEW RULES
-        pos_block = ""
-        try:
-            pos_block = position_snapshot(record, signal.current_price) + "\n"
-        except Exception as error:
-            logging.getLogger(__name__).exception(
-                "Handled failure type=%s", type(error).__name__, exc_info=False
-            )
-            pos_block = ""
-        earnings_block = self._earnings_window_block(signal.ticker)
-
-        # Compact account context: this ticker's full detail is already in
-        # pos_block above; positions.json (via PositionManager) is the
-        # single source of truth for everything else — name + live P&L only.
-        pnl_map = open_positions_pnl or {}
-        roster_line = PositionManager.other_positions_line(pnl_map, signal.ticker)
-        account_line = f"ACCOUNT: total_value={portfolio.total_value:.2f} cash_pct={portfolio.cash_percentage_display}\n{roster_line}\n"
-
-        user_prompt = (
-            f"CYCLE: {cycle_label}\n"
-            + pos_block
-            + (earnings_block + "\n" if earnings_block else "")
-            + f"TRIGGER: {signal.reason}\n"
-            f"TICKER: {signal.ticker}\n"
-            f"ENTRY_PRICE: {record.entry_price:.2f}\n"
-            f"CURRENT_PRICE: {signal.current_price:.2f}\n"
-            f"UNREALIZED_PNL_PCT: {unrealized_pct * 100:.2f}%\n"
-            f"DAYS_HELD: {days_held}\n"
-            f"STOP_LOSS_PCT: {record.stop_loss_pct * 100:.1f}%\n"
-            f"TAKE_PROFIT_PCT: {record.take_profit_pct * 100:.1f}%\n"
-            f"POSITION QUANTITY: {record.quantity:.6f}\n\n"
-            f"JOURNAL HISTORY (last 15 entries - price & metric trajectory only):\n"
-            f"{journal_block}\n\n"
-            f"LATEST METRICS:\n{json.dumps(metrics.model_dump(mode='json'), indent=2)}\n\n"
-            f"LATEST NEWS:\n{json.dumps(news, indent=2)}\n\n"
-            f"{account_line}\n"
-            + "You previously entered this position. A threshold has been crossed.\n"
-            "Re-evaluate using ALL prior journal context plus the fresh data above.\n"
-            "Decide strictly HOLD or SELL. Return only the JSON schema required by the system prompt.\n"
-            + (
-                "For STOP_LOSS the decision must be SELL.\n"
-                if signal.reason == "STOP_LOSS"
-                else ""
-            )
-        )
-
-        # ----- Soft threshold: model decides HOLD vs SELL -----
-        try:
-            response = await self.decision_engine.client.complete(
-                _MONITOR_SYSTEM_PROMPT,
-                user_prompt,
-            )
-            payload = json.loads(self.decision_engine._strip_fences(response))
-            decision_type = self.decision_engine._parse_decision(
-                payload.get("decision", "HOLD"),
-                DecisionType.HOLD,
-            )
-            edge = self.decision_engine._parse_edge(payload, signal.ticker)
-
-            return TradeDecision(
-                ticker=signal.ticker,
-                bull_thesis=str(payload.get("bull_thesis", "")),
-                bear_thesis=str(payload.get("bear_thesis", "")),
-                failure_conditions=list(payload.get("failure_conditions", []))
-                if payload.get("failure_conditions")
-                else [],
-                decision=decision_type,
-                edge=edge,
-                action_type="CLOSE" if decision_type == DecisionType.SELL else "NONE",
-                replaced_ticker=None,
-                rotate_from_ticker=None,
-                risk_notes=str(payload.get("risk_notes", "")),
-                reasoning_summary=f"MONITOR_{signal.reason}: {payload.get('reasoning_summary', '')}",
-                timestamp=datetime.now(UTC).isoformat(),
-                cycle_type="MONITOR",
-            )
-        except Exception as exc:
-            self.logger.exception(
-                "monitor_eval_failed ticker=%s error=%s",
-                signal.ticker,
-                type(exc).__name__,
-                exc_info=False,
-            )
-            return TradeDecision(
-                ticker=signal.ticker,
-                bull_thesis="Fallback monitor decision.",
-                bear_thesis="Fallback monitor decision.",
-                failure_conditions=["Monitor model unavailable"],
-                decision=DecisionType.HOLD,
-                position_size_pct=0.0,
-                action_type="NONE",
-                replaced_ticker=None,
-                edge=StructuredEdgeScore(),
-                risk_notes="Monitor fallback due to API failure.",
-                reasoning_summary="MONITOR_FALLBACK: model unavailable",
-                timestamp=datetime.now(UTC).isoformat(),
-                cycle_type="MONITOR",
-            )
 
     async def run_price_monitor(self) -> None:
         await self.backend.monitor()
@@ -618,20 +388,32 @@ class TradingAgent:
         quotes = data["quotes"]
         historicals = data["historicals"]
 
-        # Stale-data guard: if the calendar says the market is open but SPY
-        # has no usable quote, the data path is unhealthy — skip the cycle
-        # rather than let the model reason over phantom numbers.
+        # Require a usable benchmark before sending any prompts for this cycle.
         if bool(
             self.config.get("trading", {})
             .get("market_hours", {})
             .get("stale_data_guard", True)
         ):
+            from utils.freshness import fresh_quote
+
             spy_quote = quotes.get("SPY")
-            if spy_quote is None or float(getattr(spy_quote, "price", 0.0) or 0.0) <= 0:
+            if spy_quote is None or not fresh_quote(spy_quote.timestamp, self.config):
+                # The batched historical requests may outlast the initial quote.
+                refreshed = await self.mcp_client.get_equity_quotes(["SPY"])
+                spy_quote = next(
+                    (quote for quote in refreshed if quote.ticker == "SPY"), None
+                )
+            if (
+                spy_quote is None
+                or not math.isfinite(spy_quote.price)
+                or spy_quote.price <= 0
+                or not fresh_quote(spy_quote.timestamp, self.config)
+            ):
                 self.logger.warning(
-                    "cycle_skipped stale_data_guard: SPY quote unavailable while market open"
+                    "cycle_skipped stale_data_guard: fresh SPY quote unavailable while market open"
                 )
                 return
+            quotes["SPY"] = spy_quote
 
         # ---- SECTION 1: reconcile live MCP portfolio ⟷ positions.json ----
         if (
@@ -760,16 +542,26 @@ class TradingAgent:
         closed_this_cycle: set[str] = set()
         for signal in exit_signals:
             ticker = signal.ticker
-            if ticker in self.backend.review_active or ticker in reviewed_this_cycle:
+            if ticker in reviewed_this_cycle:
                 continue
-            reviewed_this_cycle.add(ticker)
             quote = await self._decision_quote(ticker, metrics.get(ticker))
             if quote is None:
                 continue
-            current_price = quote.price
+            current_price = executable_mark(quote)
             held_record = next((r for r in open_records if r.ticker == ticker), None)
-            if held_record is None:
+            if (
+                held_record is None
+                or not 0 < current_price <= held_record.effective_stop_px
+            ):
                 continue
+            reviewed_this_cycle.add(ticker)
+            signal = ExitSignal(
+                ticker,
+                "STOP_LOSS",
+                current_price,
+                current_price / held_record.entry_price - 1,
+                held_record.quantity,
+            )
             exit_decision = await self.decision_engine.review_exit(
                 signal,
                 metrics.get(ticker, MarketMetrics(ticker=ticker)),
@@ -836,12 +628,14 @@ class TradingAgent:
                         else 0.0,
                     )
                 if result.status in SUCCESS_STATUSES:
-                    effective_buying_power += signal.quantity * current_price
-                    effective_positions_count = max(
-                        0, effective_positions_count - 1
-                    )  # clamp (never negative)
-                    closed_this_cycle.add(ticker)
-                    pnl_map.pop(ticker, None)
+                    filled_quantity = result.filled_quantity or 0
+                    effective_buying_power += filled_quantity * result.fill_price
+                    if filled_quantity >= held_record.quantity:
+                        effective_positions_count = max(
+                            0, effective_positions_count - 1
+                        )
+                        closed_this_cycle.add(ticker)
+                        pnl_map.pop(ticker, None)
 
         # Refresh AFTER exits: Path A/B must never re-review a position that
         # was already closed this cycle (kills phantom double reviews,
@@ -867,7 +661,7 @@ class TradingAgent:
             if record is None:
                 continue
             quote = await self._decision_quote(ticker, metrics.get(ticker))
-            current_price = quote.price if quote else 0.0
+            current_price = executable_mark(quote) if quote else 0.0
             if current_price <= 0:
                 continue
 
@@ -957,12 +751,14 @@ class TradingAgent:
                     result.status in SUCCESS_STATUSES
                     and routine_decision.decision == DecisionType.SELL
                 ):
-                    effective_buying_power += record.quantity * current_price
-                    effective_positions_count = max(0, effective_positions_count - 1)
-                    closed_this_cycle.add(ticker)
-                    pnl_map.pop(ticker, None)
-                    # record_exit is already performed inside ExecutionEngine.execute on SELL fill.
-                    # Do not call record_exit again here.
+                    filled_quantity = result.filled_quantity or 0
+                    effective_buying_power += filled_quantity * result.fill_price
+                    if filled_quantity >= record.quantity:
+                        effective_positions_count = max(
+                            0, effective_positions_count - 1
+                        )
+                        closed_this_cycle.add(ticker)
+                        pnl_map.pop(ticker, None)
 
         # ---- Path B: non-held watchlist tickers (unchanged) ----
         for ticker in [t for t in watchlist_tickers if t != "SPY"]:
@@ -1106,12 +902,15 @@ class TradingAgent:
             )
 
         # Cost tracking is informational (never gating): log the totals.
-        self.logger.info(
-            "cycle_complete cycle=%s spend_today=$%.4f spend_month=$%.4f",
-            cycle_str,
-            self.cost_tracker.daily_total(),
-            self.cost_tracker.monthly_total(),
-        )
+        if self.cost_tracker is not None:
+            self.logger.info(
+                "cycle_complete cycle=%s spend_today=$%.4f spend_month=$%.4f",
+                cycle_str,
+                self.cost_tracker.daily_total(),
+                self.cost_tracker.monthly_total(),
+            )
+        else:
+            self.logger.info("cycle_complete cycle=%s", cycle_str)
         self.backend.health.record(
             "decision_cycle:" + cycle_str,
             success=not llm_failed,
@@ -1165,7 +964,6 @@ class TradingAgent:
     async def _start_jobs(self) -> None:
         configure_logging(level=self.config.get("logging", {}).get("level", "INFO"))
         self.logger.info("agent_start dry_run=%s", self.config["env"]["DRY_RUN"])
-        # Loud, unmistakable mode banner — the ONLY switch is settings.json.
         if self.config["env"]["DRY_RUN"]:
             self.logger.info("=" * 60)
             self.logger.info("*** DRY-RUN MODE — orders are simulated only ***")
@@ -1173,12 +971,18 @@ class TradingAgent:
                 "*** Live activation requires owner release approval and all runtime safety gates ***"
             )
             self.logger.info("=" * 60)
+        elif not self.config["execution"]["live_release_approved"]:
+            self.logger.warning(
+                "LIVE SUBMISSIONS BLOCKED — release approval is required"
+            )
         else:
             self.logger.info("=" * 60)
             self.logger.info(
                 "*** LIVE TRADING MODE — execution.dry_run=false in settings.json ***"
             )
-            self.logger.info("*** Real orders WILL be placed through Robinhood. ***")
+            self.logger.info(
+                "*** Real orders are eligible only after runtime checks. ***"
+            )
             self.logger.info("=" * 60)
 
         await self.backend.reconcile()
@@ -1195,7 +999,9 @@ class TradingAgent:
             "cron",
             id="nightly",
             replace_existing=True,
-            hour=20,
+            hour=self.config["discovery"]["schedule"]["feature_hour_et"]
+            if self.backend.discovery
+            else 20,
             minute=0,
             timezone="America/New_York",
             max_instances=1,
@@ -1296,9 +1102,10 @@ class TradingAgent:
                 coalesce=True,
             )
             self.logger.info(
-                "attribution_report_registered at=%02d:%02d ET",
+                "attribution_report_registered at=%02d:%02d timezone=%s",
                 int(rep_cfg.get("attribution_hour", 16)),
                 int(rep_cfg.get("attribution_minute", 5)),
+                tz_name,
             )
 
         # Safety jobs start before optional model initialization/bootstrap.
@@ -1335,46 +1142,26 @@ class TradingAgent:
 
         # --- Smart startup catch-up ---
         tz = pytz.timezone(tz_name)
-        now_et = datetime.now(tz)
-        current_time = now_et.time()
-        weekday = now_et.weekday()
+        now_local = datetime.now(tz)
+        current_time = now_local.time()
 
         open_time = time(open_h, open_m)
         mid_time = time(mid_h, mid_m)
         close_time = time(close_h, close_m)
-        after_hours = time(16, 0)
-
-        if weekday >= 5:
+        if current_time < open_time:
             self.logger.info(
-                "outside market hours, waiting for next trading day (ET=%s weekday=%d)",
-                current_time.strftime("%H:%M"),
-                weekday,
+                "waiting_for_open open_at=%s time=%s", open_time, now_local
             )
-        elif current_time >= after_hours:
-            self.logger.info(
-                "outside_after_hour waiting for next trading day (ET=%s)",
-                current_time.strftime("%H:%M"),
-            )
-        elif current_time < open_time:
-            self.logger.info(
-                "waiting_for_open open_at=%s (ET=%s)",
-                open_time.strftime("%H:%M"),
-                current_time.strftime("%H:%M"),
-            )
+        elif not is_market_open_at(now_local):
+            self.logger.info("catch_up_skipped market_closed time=%s", now_local)
         elif current_time < mid_time:
-            self.logger.info(
-                "catch_up: running OPEN now (ET=%s)", current_time.strftime("%H:%M")
-            )
+            self.logger.info("catch_up: running OPEN now time=%s", now_local)
             await self.run_cycle(CycleType.OPEN)
         elif current_time < close_time:
-            self.logger.info(
-                "catch_up: running MID now (ET=%s)", current_time.strftime("%H:%M")
-            )
+            self.logger.info("catch_up: running MID now time=%s", now_local)
             await self.run_cycle(CycleType.MID)
         else:
-            self.logger.info(
-                "catch_up: running CLOSE now (ET=%s)", current_time.strftime("%H:%M")
-            )
+            self.logger.info("catch_up: running CLOSE now time=%s", now_local)
             await self.run_cycle(CycleType.CLOSE)
 
         await self._stop_event.wait()

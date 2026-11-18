@@ -379,7 +379,7 @@ async def test_main_cycle_reaches_each_execution_action(
     agent = TradingAgent.__new__(TradingAgent)
     agent.__dict__.update(backend.agent.__dict__)
     backend.agent, agent.backend = agent, backend
-    agent.config = load_config(include_secrets=False)
+    agent.config = load_config(include_secrets=False, root=tmp_path)
     agent.logger = Mock()
     agent._is_market_open = Mock(return_value=True)
     agent._discovery_task = agent._nightly_task = None
@@ -422,7 +422,12 @@ async def test_main_cycle_reaches_each_execution_action(
     if action == "SELL":
         from core.position.manager import ExitSignal
 
-        pm.check_exits = Mock(return_value=[ExitSignal("ABC", "STOP_LOSS", 100, 0, 2)])
+        quotes["ABC"] = quotes["ABC"].model_copy(
+            update={"price": 85, "bid": 84, "ask": 86}
+        )
+        pm.check_exits = Mock(
+            return_value=[ExitSignal("ABC", "STOP_LOSS", 85, -0.15, 2)]
+        )
     held_action = action if action in ("SELL", "ADD_TO_POSITION") else "HOLD"
     new_action = action if action in ("BUY", "ROTATE") else "IGNORE"
     agent.decision_engine = SimpleNamespace(

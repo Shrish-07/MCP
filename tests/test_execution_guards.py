@@ -255,8 +255,11 @@ async def test_tradability_error_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_tradability_unparseable_fails_closed():
-    eng, _pm = make_engine(FakeClient(tradability={}))
+@pytest.mark.parametrize(
+    "tradability", [{}, {"tradeable": None}, {"tradeable": "false"}]
+)
+async def test_tradability_unparseable_fails_closed(tradability):
+    eng, _pm = make_engine(FakeClient(tradability=tradability))
     r = await eng.execute(
         make_decision("BUY"),
         make_portfolio(),

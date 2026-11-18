@@ -178,7 +178,7 @@ async def test_startup_failure_always_marks_process_stopped(tmp_path):
     assert signal.getsignal(signal.SIGTERM) == before
 
 
-def test_config_inspection_does_not_read_secret_sources(monkeypatch):
+def test_config_inspection_does_not_read_secret_sources(monkeypatch, tmp_path):
     import utils.config as module
 
     monkeypatch.setattr(
@@ -186,7 +186,7 @@ def test_config_inspection_does_not_read_secret_sources(monkeypatch):
         "load_dotenv",
         Mock(side_effect=AssertionError("Secret source accessed")),
     )
-    config = load_config(include_secrets=False)
+    config = load_config(include_secrets=False, root=tmp_path)
     assert config["env"]["ANTHROPIC_API_KEY"] == config["env"]["FINNHUB_API_KEY"] == ""
     assert config["execution"]["dry_run"] is True
     assert config["execution"]["live_release_approved"] is False

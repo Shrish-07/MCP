@@ -34,16 +34,30 @@ def select_new(rows, holdings, cfg, history=()):
     ]
 
 
-def publish(path, candidates, metadata):
+def prior_history(path):
+    try:
+        previous = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    history = previous.get("history", []) if isinstance(previous, dict) else []
+    if not isinstance(history, list):
+        return []
+    return [
+        run
+        for run in history
+        if isinstance(run, list) and all(isinstance(ticker, str) for ticker in run)
+    ]
+
+
+def publish(path, candidates, metadata, *, candidate_memory_runs=2):
     path = Path(path)
-    previous = json.loads(path.read_text()) if path.exists() else {}
     payload = {
         "run_id": str(uuid4()),
         "generated_at": datetime.now(UTC).isoformat(),
         "status": "SUCCESS",
         "new_candidates": candidates,
-        "history": (previous.get("history", []) + [[c["ticker"] for c in candidates]])[
-            -2:
+        "history": (prior_history(path) + [[c["ticker"] for c in candidates]])[
+            -candidate_memory_runs:
         ],
         **metadata,
     }
@@ -68,10 +82,25 @@ def mark_failed(path, error):
 
 
 def load_shortlist(path, max_age_days=8):
-    value = json.loads(Path(path).read_text())
-    age = (
-        datetime.now(UTC) - datetime.fromisoformat(value["generated_at"])
-    ).total_seconds() / 86400
-    if not 0 <= age <= max_age_days or value["status"] != "SUCCESS":
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("status") != "SUCCESS":
+        raise ValueError("invalid shortlist")
+    try:
+        age = (
+            datetime.now(UTC) - datetime.fromisoformat(value["generated_at"])
+        ).total_seconds() / 86400
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("invalid shortlist timestamp") from exc
+    candidates = value.get("new_candidates")
+    if (
+        not 0 <= age <= max_age_days
+        or not isinstance(candidates, list)
+        or not all(
+            isinstance(row, dict)
+            and isinstance(row.get("ticker"), str)
+            and row["ticker"].strip()
+            for row in candidates
+        )
+    ):
         raise ValueError("stale/invalid shortlist")
     return value

@@ -59,6 +59,7 @@ def _make_selector(config: dict, tmp_path) -> WeeklySelector:
     selector.universe_size = ss.get("universe_size", 10)
     selector.max_positions = config.get("trading", {}).get("max_positions", 12)
     selector.lookback_days = ss.get("lookback_days", 7)
+    selector.batch_size = ss.get("batch_size", 16)
     selector.min_sentiment_score = ss.get("min_sentiment_score", -1.0)
     selector.data_dir = tmp_path
     selector.selected_universe_path = tmp_path / "selected_universe.json"
@@ -243,7 +244,7 @@ async def test_e2e_mean_aggregation(base_config, tmp_path):
     )
 
     class _FakeModel:
-        def score_headlines(self, headlines):
+        def score_headlines(self, headlines, *, batch_size):
             assert headlines == ["h1", "h2", "h3"]  # every headline is scored
             return [0.9, 0.3, -0.3]
 

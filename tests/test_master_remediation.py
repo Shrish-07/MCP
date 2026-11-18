@@ -195,8 +195,16 @@ async def test_partial_sell_fifo_basis_and_metadata(tmp_path, monkeypatch):
     backend.agent.executor._submit = AsyncMock(
         return_value=result("WOULD_EXECUTE", qty=0, side="sell")
     )
-    await backend.agent.executor._sell_leg(d, portfolio(), 130, True, record)
+    rejected = await backend.agent.executor._sell_leg(d, portfolio(), 130, True, record)
+    assert rejected.status == "REJECTED_PARTIAL_TAKE_THRESHOLD"
+    backend.agent.executor._submit.assert_not_awaited()
+    await backend.agent.executor._sell_leg(d, portfolio(), 131, True, record)
     assert backend.agent.executor._submit.await_args.args[2] == 1.5
+    backend.agent.executor.settings["exits"]["partial_take"]["enabled"] = False
+    backend.agent.executor._submit.reset_mock()
+    rejected = await backend.agent.executor._sell_leg(d, portfolio(), 131, True, record)
+    assert rejected.status == "REJECTED_PARTIAL_TAKE_DISABLED"
+    backend.agent.executor._submit.assert_not_awaited()
 
 
 @pytest.mark.asyncio

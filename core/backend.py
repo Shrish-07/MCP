@@ -11,7 +11,7 @@ from models.decisions import DecisionType, TradeDecision
 from models.portfolio import Portfolio
 from robinhood_mcp.robinhood_client import AccountResolutionError, AuthenticationError
 from utils.freshness import fresh_quote, fresh_timestamp
-from utils.health import Health
+from utils.health import Health, monitor_max_age
 from utils.market_calendar import is_market_open_at
 
 
@@ -28,6 +28,9 @@ class Backend:
         self.held_features = {}
         self.held_news_fetcher = None
         self.last_portfolio = Portfolio()
+        self.news_cache_hours = agent.config.get("sentiment_selection", {}).get(
+            "cache_max_age_hours", 24
+        )
         self.discovery = None
         if agent.config.get("discovery", {}).get("enabled"):
             from core.data.sentiment import get_sentiment_model
@@ -39,7 +42,7 @@ class Backend:
                 agent.config,
                 agent.mcp_client,
                 self.pm,
-                WeeklyNewsFetcher(),
+                WeeklyNewsFetcher(cache_max_age_hours=self.news_cache_hours),
                 get_sentiment_model,
             )
 
@@ -196,8 +199,15 @@ class Backend:
         if self.monitor_lock.locked() or not is_market_open_at():
             return
         async with self.monitor_lock:
-            self.health.record("monitor")
-            if self.health.stale("broker", 60) and not await self.reconcile():
+            interval = self.agent.config.get("monitor", {}).get("interval_seconds", 15)
+            self.health.record("monitor", interval_seconds=interval)
+            reconciliation_age = self.agent.config.get("execution", {}).get(
+                "reconciliation_max_age_seconds", 120
+            )
+            if (
+                self.health.stale("broker", min(60, reconciliation_age))
+                and not await self.reconcile()
+            ):
                 self.health.record(
                     "monitor",
                     success=False,
@@ -316,13 +326,20 @@ class Backend:
 
     async def drain_reviews(self):
         """One model call per affected ticker; never hold execution locks during it."""
+        if not self.agent.config.get("exits", {}).get("enabled", True):
+            return
         from core.exits.exit_evidence import due_reviews
         from core.exits.exit_state import finish_review
         from core.position.manager import ExitSignal
         from models.decisions import CycleType
 
+        monitor = self.agent.config.get("monitor", {})
         for record in self.pm.get_open_records():
-            events = due_reviews(record)
+            events = due_reviews(
+                record,
+                retry_minutes=monitor.get("profit_review_cooldown_min", 15),
+                graduation_retry_minutes=monitor.get("profit_target_cooldown_min", 5),
+            )
             if (
                 not events
                 or record.ticker in self.review_active
@@ -358,7 +375,7 @@ class Backend:
                 quote = next((q for q in quotes if q.ticker == ticker), None)
                 if quote is None or not fresh_quote(quote.timestamp, self.agent.config):
                     raise ValueError("review quote stale")
-                price = quote.bid if quote.bid > 0 else quote.price
+                price = executable_mark(quote)
                 facts = self.evidence_for(ticker, metrics, quote)
                 facts["review_events"] = events
                 signal = ExitSignal(
@@ -444,7 +461,7 @@ class Backend:
                     result = await self.agent.executor.execute(
                         decision,
                         self.last_portfolio,
-                        q.bid if q.bid > 0 else q.price,
+                        executable_mark(q),
                         dry_run=self.agent.config["env"]["DRY_RUN"],
                         quote_timestamp=q.timestamp,
                         vol_30d=metrics.realized_vol_30d,
@@ -492,7 +509,10 @@ class Backend:
 
     async def heartbeat(self):
         self.health.record("heartbeat", success=True)
-        if is_market_open_at() and self.health.stale("monitor", 90):
+        interval = self.agent.config.get("monitor", {}).get("interval_seconds", 15)
+        if is_market_open_at() and self.health.stale(
+            "monitor", monitor_max_age(interval)
+        ):
             self.health.record(
                 "watchdog", success=False, error="monitor heartbeat overdue"
             )
@@ -581,7 +601,9 @@ class Backend:
                             from core.weekly.news import WeeklyNewsFetcher
 
                             if self.held_news_fetcher is None:
-                                self.held_news_fetcher = WeeklyNewsFetcher()
+                                self.held_news_fetcher = WeeklyNewsFetcher(
+                                    cache_max_age_hours=self.news_cache_hours
+                                )
                             model = await asyncio.to_thread(get_sentiment_model)
                             fresh_news = await collect_news_features(
                                 NewsHistory(

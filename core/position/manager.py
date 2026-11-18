@@ -88,9 +88,6 @@ class PositionManager:
         self._stop_bands = sorted(
             trading.get("stop_loss_bands", self.DEFAULT_STOP_BANDS)
         )
-        self._review_gain_pct = float(trading.get("profit_review_pct", 0.15))
-        self._max_holding_days = int(trading.get("max_holding_days", 15))
-        self._take_profit_pct = float(trading.get("take_profit_pct", 0.20))
         if not self._path.exists():
             atomic_json(self._path, self._empty())
         self.get_open_records()

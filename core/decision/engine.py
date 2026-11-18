@@ -778,6 +778,19 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
         weakest_ticker = (
             min(pnl_map, key=pnl_map.get, default=None) if pnl_map else None
         )
+        exits = self._settings.get("exits", {})
+        partial = exits.get("partial_take", {})
+        graduation = (
+            f"{exits.get('take_profit_pct', 0.20):.1%}"
+            if exits.get("enabled", True)
+            else "disabled"
+        )
+        reduction = (
+            f"eligible from {partial.get('at_pct', 0.15):.1%} gain, "
+            f"reduces {partial.get('fraction', 0.5):.1%} of shares"
+            if exits.get("enabled", True) and partial.get("enabled", False)
+            else "disabled"
+        )
 
         return (
             (spy_context + "\n" if spy_context else "")
@@ -805,7 +818,8 @@ window sizing. Soft reviews cannot override hard account/order/data/risk limits.
                 f"  Unrealized P&L: {unrealized_pnl_pct * 100:.2f}%\n"
                 f"  Days Held: {days_held}\n"
                 f"  Stop-Loss: {position_record.stop_loss_pct * 100:.1f}%\n"
-                f"  Take-Profit: {position_record.take_profit_pct * 100:.1f}%\n"
+                f"  Graduation Review Threshold: {graduation}\n"
+                f"  Partial Profit Take: {reduction}\n"
                 if position_record is not None
                 else "EXISTING POSITION: None\n"
             )

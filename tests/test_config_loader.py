@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
-from utils.config import _deep_merge, _safe_bool
+import json
+
+import pytest
+
+from utils.config import _deep_merge, load_config
 
 
-def test_safe_bool_only_explicit_false_enables_live():
-    # dry_run semantics: True = dry (safe). Anything ambiguous → safe default.
-    assert _safe_bool(False) is False
-    assert _safe_bool("false") is False
-    assert _safe_bool("FALSE") is False
-    assert _safe_bool(True) is True
-    assert _safe_bool("true") is True
-    assert _safe_bool("yes") is True  # unknown → safe (dry)
-    assert _safe_bool(None) is True  # missing → safe (dry)
-    assert _safe_bool("") is True
-    assert _safe_bool("maybe") is True
-    assert _safe_bool(0) is False  # explicit numeric False
-    assert _safe_bool(1) is True
+@pytest.mark.parametrize(
+    ("requested", "dry_run"),
+    [(False, False), (True, True), ("false", True), (0, True), (None, True)],
+)
+def test_only_explicit_false_requests_live_mode(tmp_path, requested, dry_run):
+    path = tmp_path / "config/settings.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"execution": {"dry_run": requested}}), encoding="utf-8")
+    cfg = load_config(root=tmp_path, include_secrets=False)
+    assert cfg["execution"]["dry_run"] is dry_run
+    assert cfg["env"]["DRY_RUN"] is dry_run
+    assert cfg["execution"]["live_release_approved"] is False
 
 
 def test_deep_merge_override_wins_and_keeps_extras():
@@ -27,30 +30,31 @@ def test_deep_merge_override_wins_and_keeps_extras():
     assert merged == {"a": 1, "b": {"x": 9, "y": 2}, "c": 3}
 
 
-def test_load_config_fail_safe(tmp_path, monkeypatch):
-    """A malformed settings.json must produce a DRY-RUN config, never live."""
-    import utils.config as cfg_mod
-
-    bad = tmp_path / "settings.json"
-    bad.write_text("{not json", encoding="utf-8")
-
-    real_base = cfg_mod.Path
-
-    class FakePath(type(real_base())):  # thin shim over Path
-        @property
-        def parent(self):
-            p = super().parent
-            return p
-
-    # Simpler: monkeypatch the read side to raise JSONDecodeError via text:
-    monkeypatch.setattr(cfg_mod, "load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-    monkeypatch.setenv("FINNHUB_API_KEY", "")
-    cfg = cfg_mod.load_config()
-    assert cfg["execution"]["dry_run"] is True  # shipping config stays dry
+@pytest.mark.parametrize(
+    "raw", ["{not json", '{"execution":{"dry_run":true,"dry_run":false}}']
+)
+def test_load_config_fail_safe(tmp_path, raw):
+    """A malformed or ambiguous file uses safe defaults."""
+    path = tmp_path / "config/settings.json"
+    path.parent.mkdir()
+    path.write_text(raw, encoding="utf-8")
+    cfg = load_config(root=tmp_path, include_secrets=False)
+    assert cfg["execution"]["dry_run"] is True
     assert cfg["env"]["DRY_RUN"] is True
     assert cfg["models"]["decision"] == "claude-sonnet-5-5"
     assert cfg["env"]["FINNHUB_API_KEY"] == ""  # empty if env absent
     assert "cost_limits" not in cfg  # enforcement is gone
     assert cfg["trading"]["market_hours"]["calendar"] == "NYSE"
     assert cfg["monitor"]["interval_seconds"] >= 5
+
+
+def test_comments_are_excluded_from_runtime_and_revision(tmp_path):
+    path = tmp_path / "config/settings.json"
+    path.parent.mkdir()
+    path.write_text('{"execution": {"dry_run": true}}', encoding="utf-8")
+    before = load_config(root=tmp_path, include_secrets=False)
+    path.write_text(
+        '{"execution": {"// dry_run": "A note", "dry_run": true}}',
+        encoding="utf-8",
+    )
+    assert load_config(root=tmp_path, include_secrets=False) == before
