@@ -1,44 +1,9 @@
-Consolidate core packages and complete discovery hand-off
+Restore dry-run defaults and document the discovery funnel
 
-Remove the ten flat core re-export modules and the compatibility tests
-that required those modules. Move completed-session and Wilder ATR
-helpers into core.data.daily. Move the shared Finnhub client into
-core.data.company_news and paired evaluation into core.discovery.
-Use an agent-owned weekly selector with an explicit new-name policy.
-Extract periodic job registration from the main lifecycle.
+Enable dry-run previews and disable live release approval in this
+checkout. Update the setting comments and describe the implemented
+L0–L6 pipeline in the discovery package docstring.
 
-Complete the discovery path from a validated constituent snapshot
-through the scheduled eligibility and feature scan. Reuse L1/L2
-snapshots only when their session, universe, and feature settings match.
-Request enough history for the configured gate and the 252-session
-high. Isolate malformed broker history to the affected symbol. Retain
-valid local universe input when an upstream refresh fails.
-
-Share strict L3 news processing with held-position research and
-record ticker exclusions for sparse or unavailable evidence. Keep
-strict provider cache entries separate from legacy outcomes. Freeze
-scoring weights with entry references and reject incompatible model
-comparisons. Publish validated shortlist generations with linked
-ranks, cutoffs, exclusions, and run IDs. Hold one generation through
-the decision cycle, including when a replacement publishes mid-cycle.
-Keep held reviews active when discovery's shortlist is unavailable.
-
-Schedule discovery feature refresh independently of held-position
-maintenance. Honor the configured quote-age setting in trailing
-updates and continue protecting other holdings if one quote is invalid.
-Keep the existing execution gates, order-state transitions, and broker
-authentication within their owning modules. The longer execution,
-position-state, and trace modules retain their lifecycle context.
-
-Move the guarded test runner into scripts and use it in CI and the
-weekly harness. Update the walkthrough, authentication, security, and
-contributor docs. Index dated verification and audit materials in place
-to preserve historical links.
-
-Verify the full funnel and decision prompts with synthetic provider
-fixtures. The guarded suite passed 259 tests with three heavy tests
-deselected. The weekly harness passed 39 tests. Ruff, AST import
-checks, isolated preflight, and a paired evaluation CLI fixture passed.
-Active setting values are preserved. Verification used isolated copies
-without secrets or real account state, and the live backend was not
-started. Leave all changes unstaged without committing or pushing.
+Verify canonical imports, unchanged remaining settings, and 23 focused
+offline tests. The README and walkthrough already describe the current
+discovery flow.

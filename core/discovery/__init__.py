@@ -1,7 +1,7 @@
-"""Discovery funnel (L0-L6): universe, gates, features, divergence, shortlist.
+"""Implemented L0–L6 discovery funnel, wired through `discovery.enabled`.
 
-Reserved for the flag-gated discovery layer (config: discovery.enabled,
-default OFF). Empty placeholder: implementation lands with the discovery
-stage of the master plan. All modules here must be zero-cost local
-computation + existing free data paths only.
+The pipeline validates the universe, applies eligibility gates, computes
+technical and news features with local sentiment inference, scores
+divergence, and publishes a shortlist. The application passes evidence
+from that shortlist to the decision engine. Paired evaluation runs offline.
 """
