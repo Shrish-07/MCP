@@ -5,7 +5,7 @@ import logging
 import math
 import signal as process_signal
 from contextlib import suppress
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytz
@@ -16,11 +16,13 @@ from core.data.ingest import DataIngestLayer
 from core.data.metrics import MetricsEngine
 from core.data.news import NewsFetcher
 from core.decision.engine import DecisionEngine
+from core.discovery.evidence import candidate_tickers
 from core.execution.engine import ExecutionEngine
 from core.exits.trail_manager import executable_mark
 from core.position.manager import ExitSignal, PositionManager
 from core.position.pnl_tracker import PnLTracker
-from core.weekly.selector import WeeklySelector, get_weekly_selector
+from core.scheduling import register_jobs
+from core.weekly.selector import WeeklySelector
 from models.decisions import (
     SUCCESS_STATUSES,
     CycleType,
@@ -86,7 +88,6 @@ class TradingAgent:
         self._cached_watchlist_date: str = ""
 
         # Weekly sentiment selector (lazy-loaded on first use)
-        self._weekly_selector: WeeklySelector | None = None
         self._weekly_selector_task = None
         self._discovery_task = None
         self._nightly_task = None
@@ -110,43 +111,21 @@ class TradingAgent:
 
     async def _get_weekly_selector(self) -> WeeklySelector:
         """Lazy initialization of weekly selector."""
-        if self._weekly_selector is None:
-            if self._weekly_selector_task is None:
-                self._weekly_selector_task = asyncio.create_task(
-                    get_weekly_selector(
-                        self.config, position_manager=self.position_manager
-                    )
-                )
-            self._weekly_selector = await self._weekly_selector_task
-            self._weekly_selector.position_manager = self.position_manager
-        return self._weekly_selector
+        if self._weekly_selector_task is None:
+            self._weekly_selector_task = asyncio.create_task(
+                self._initialize_weekly_selector()
+            )
+        return await asyncio.shield(self._weekly_selector_task)
 
-    async def _resolve_watchlist(self) -> list[str]:
-        """Resolve the trading watchlist, preferring the sentiment-selected universe."""
-        discovery = self.config.get("discovery", {})
-        if discovery.get("enabled"):
-            from core.discovery.shortlist import load_shortlist
+    async def _initialize_weekly_selector(self):
+        selector = WeeklySelector(
+            self.config, position_manager=self.position_manager, new_names_only=True
+        )
+        await selector.initialize()
+        return selector
 
-            try:
-                snapshot = load_shortlist(
-                    Path(__file__).resolve().parent / discovery["shortlist_file"],
-                    discovery["shortlist_max_age_days"],
-                )
-                held = (
-                    {r.ticker for r in self.position_manager.get_open_records()}
-                    if self.position_manager.reconciliation_ok
-                    else set()
-                )
-                return [
-                    r["ticker"]
-                    for r in snapshot["new_candidates"]
-                    if r["ticker"] not in held
-                ][: discovery["shortlist"]["new_candidate_count"]]
-            except (OSError, ValueError, KeyError) as exc:
-                self.logger.warning(
-                    "discovery_shortlist_unavailable type=%s", type(exc).__name__
-                )
-                return []
+    async def _resolve_legacy_watchlist(self) -> list[str]:
+        """Resolve candidates through weekly selection and watchlist fallbacks."""
         # Prefer the weekly sentiment-selected universe when enabled
         try:
             selector = await self._get_weekly_selector()
@@ -364,19 +343,29 @@ class TradingAgent:
                 if task.done():
                     self._discovery_task = None
         today = datetime.now(UTC).date().isoformat()
-        if (
-            not self.config.get("discovery", {}).get("enabled")
-            and self._cached_watchlist_date == today
-            and self._cached_watchlist
-        ):
-            watchlist_tickers = self._cached_watchlist
-        else:
-            watchlist_tickers = await self._resolve_watchlist()
-            self._cached_watchlist = watchlist_tickers
-            self._cached_watchlist_date = today
-
+        discovery_cfg = self.config.get("discovery", {})
+        snapshot = None
         open_records = self.position_manager.get_open_records()
         existing_tickers = [r.ticker for r in open_records]
+        if discovery_cfg.get("enabled"):
+            # Pin one generation for both L5 selection and every L6 prompt.
+            snapshot = self.backend.read_discovery_shortlist()
+            self.backend.health.record(
+                "discovery_handoff",
+                success=snapshot is not None,
+                error="No valid discovery shortlist" if snapshot is None else None,
+            )
+            watchlist_tickers = candidate_tickers(
+                snapshot,
+                set(existing_tickers),
+                discovery_cfg["shortlist"]["new_candidate_count"],
+            )
+        elif self._cached_watchlist_date == today and self._cached_watchlist:
+            watchlist_tickers = self._cached_watchlist
+        else:
+            watchlist_tickers = await self._resolve_legacy_watchlist()
+            self._cached_watchlist = watchlist_tickers
+            self._cached_watchlist_date = today
 
         all_fetch_tickers = list(
             dict.fromkeys(["SPY"] + watchlist_tickers + existing_tickers)
@@ -573,7 +562,9 @@ class TradingAgent:
                 open_positions_pnl=pnl_map,
                 effective_buying_power=effective_buying_power,
                 evidence=dict(
-                    self.backend.evidence_for(ticker, metrics.get(ticker), quote),
+                    self.backend.evidence_for(
+                        ticker, metrics.get(ticker), quote, snapshot=snapshot
+                    ),
                     position_id=held_record.position_id,
                 ),
             )
@@ -688,7 +679,9 @@ class TradingAgent:
                 open_positions_pnl=pnl_map,
                 effective_buying_power=effective_buying_power,
                 evidence=dict(
-                    self.backend.evidence_for(ticker, metrics.get(ticker), quote),
+                    self.backend.evidence_for(
+                        ticker, metrics.get(ticker), quote, snapshot=snapshot
+                    ),
                     position_id=record.position_id,
                 ),
             )
@@ -779,7 +772,9 @@ class TradingAgent:
                 cycle_type,
                 spy_context=spy_context,
                 open_positions_pnl=pnl_map,
-                evidence=self.backend.evidence_for(ticker, metrics.get(ticker), quote),
+                evidence=self.backend.evidence_for(
+                    ticker, metrics.get(ticker), quote, snapshot=snapshot
+                ),
             )
             mm = metrics.get(ticker)
             # ROTATE touches the HELD rotate_from position — take that ticker's
@@ -986,127 +981,7 @@ class TradingAgent:
             self.logger.info("=" * 60)
 
         await self.backend.reconcile()
-        self.scheduler.add_job(
-            self.backend.heartbeat,
-            "interval",
-            seconds=30,
-            max_instances=1,
-            id="heartbeat",
-            replace_existing=True,
-        )
-        self.scheduler.add_job(
-            self.backend.nightly,
-            "cron",
-            id="nightly",
-            replace_existing=True,
-            hour=self.config["discovery"]["schedule"]["feature_hour_et"]
-            if self.backend.discovery
-            else 20,
-            minute=0,
-            timezone="America/New_York",
-            max_instances=1,
-            coalesce=True,
-        )
-        if self.backend.discovery:
-            d = self.config["discovery"]["schedule"]
-            self.scheduler.add_job(
-                self.backend.weekly,
-                "cron",
-                id="discovery_weekly",
-                replace_existing=True,
-                day_of_week=d["rank_day"],
-                hour=d["rank_hour_et"],
-                minute=0,
-                timezone="America/New_York",
-                max_instances=1,
-                coalesce=True,
-            )
-        schedule = self.config.get("schedule", {})
-        open_h = int(schedule.get("open_hour", 9))
-        open_m = int(schedule.get("open_minute", 35))
-        mid_h = int(schedule.get("mid_hour", 12))
-        mid_m = int(schedule.get("mid_minute", 30))
-        close_h = int(schedule.get("close_hour", 15))
-        close_m = int(schedule.get("close_minute", 30))
-        tz_name = schedule.get("timezone", "America/New_York")
-
-        self.scheduler.add_job(
-            self.run_cycle,
-            "cron",
-            args=[CycleType.OPEN],
-            id="decision_open",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            day_of_week="mon-fri",
-            hour=open_h,
-            minute=open_m,
-            timezone=tz_name,
-        )
-        self.scheduler.add_job(
-            self.run_cycle,
-            "cron",
-            args=[CycleType.MID],
-            id="decision_mid",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            day_of_week="mon-fri",
-            hour=mid_h,
-            minute=mid_m,
-            timezone=tz_name,
-        )
-        self.scheduler.add_job(
-            self.run_cycle,
-            "cron",
-            args=[CycleType.CLOSE],
-            id="decision_close",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            day_of_week="mon-fri",
-            hour=close_h,
-            minute=close_m,
-            timezone=tz_name,
-        )
-
-        # --- Config-speed price monitor (interval from settings.json) ---
-        # One interval handles every supported period. The NYSE-calendar
-        # gate in Backend.monitor excludes holidays and early-close hours.
-        mon_cfg = self.config.get("monitor", {})
-        if bool(mon_cfg.get("enabled", True)):
-            interval_s = max(5, int(mon_cfg.get("interval_seconds", 15)))
-            self.scheduler.add_job(
-                self.run_price_monitor,
-                "interval",
-                seconds=interval_s,
-                id="position_monitor",
-                replace_existing=True,
-                max_instances=1,
-                coalesce=True,
-            )
-            self.logger.info("monitor_registered interval_seconds=%d", interval_s)
-        # --- Daily attribution report (fix: previously defined but never scheduled) ---
-        rep_cfg = self.config.get("reporting", {})
-        if bool(rep_cfg.get("attribution_enabled", True)):
-            self.scheduler.add_job(
-                self._run_attribution_report,
-                "cron",
-                id="attribution",
-                replace_existing=True,
-                day_of_week="mon-fri",
-                hour=int(rep_cfg.get("attribution_hour", 16)),
-                minute=int(rep_cfg.get("attribution_minute", 5)),
-                timezone=tz_name,
-                max_instances=1,
-                coalesce=True,
-            )
-            self.logger.info(
-                "attribution_report_registered at=%02d:%02d timezone=%s",
-                int(rep_cfg.get("attribution_hour", 16)),
-                int(rep_cfg.get("attribution_minute", 5)),
-                tz_name,
-            )
+        tz_name, (open_time, mid_time, close_time) = register_jobs(self)
 
         # Safety jobs start before optional model initialization/bootstrap.
         self.scheduler.start()
@@ -1121,7 +996,7 @@ class TradingAgent:
                     selector.start_scheduler(self.scheduler)
                     self.logger.info("weekly_scheduler_registered")
                     # Bootstrap: run once on startup if no previous selection exists
-                    if not getattr(selector, "_selected_tickers", None):
+                    if not selector.selected_universe:
                         self.logger.info(
                             "weekly_selection bootstrap: no previous selection, running now"
                         )
@@ -1145,9 +1020,6 @@ class TradingAgent:
         now_local = datetime.now(tz)
         current_time = now_local.time()
 
-        open_time = time(open_h, open_m)
-        mid_time = time(mid_h, mid_m)
-        close_time = time(close_h, close_m)
         if current_time < open_time:
             self.logger.info(
                 "waiting_for_open open_at=%s time=%s", open_time, now_local

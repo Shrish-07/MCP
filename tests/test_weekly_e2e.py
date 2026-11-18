@@ -53,6 +53,7 @@ def _make_selector(config: dict, tmp_path) -> WeeklySelector:
 
     selector = WeeklySelector.__new__(WeeklySelector)
     selector.config = config
+    selector.new_names_only = False
     selector.logger = logging.getLogger("test.weekly_selector")
     ss = config.get("sentiment_selection", {})
     selector.enabled = ss.get("enabled", False)

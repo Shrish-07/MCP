@@ -40,6 +40,7 @@ async def test_real_startup_registration_is_complete_without_external_process(
     agent.config = load_config(include_secrets=False)
     agent.config["monitor"]["interval_seconds"] = seconds
     agent.config["discovery"]["enabled"] = discovery
+    agent.config["discovery"]["schedule"]["feature_hour_et"] = 19
     agent.scheduler = Scheduler()
     agent.logger = Mock()
     agent.backend = SimpleNamespace(
@@ -48,6 +49,7 @@ async def test_real_startup_registration_is_complete_without_external_process(
         monitor=AsyncMock(),
         nightly=AsyncMock(),
         weekly=AsyncMock(),
+        refresh_discovery_features=AsyncMock(),
         heartbeat=Mock(),
         ensure_discovery=AsyncMock(return_value=True),
         ensure_nightly=AsyncMock(return_value=True),
@@ -86,30 +88,12 @@ async def test_real_startup_registration_is_complete_without_external_process(
         agent._get_weekly_selector.assert_not_awaited()
         agent.backend.ensure_discovery.assert_awaited_once()
         assert "discovery_weekly" in agent.scheduler.jobs
+        features, _, options = agent.scheduler.jobs["discovery_features"]
+        assert options["hour"] == 19 and options["timezone"] == "America/New_York"
+        await features()
+        agent.backend.refresh_discovery_features.assert_awaited_once()
     else:
         agent._get_weekly_selector.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_enabled_discovery_never_silently_uses_legacy(monkeypatch):
-    from core.discovery import shortlist
-
-    monkeypatch.setattr(
-        shortlist, "load_shortlist", Mock(side_effect=ValueError("stale"))
-    )
-    agent = SimpleNamespace(
-        config={
-            "discovery": {
-                "enabled": True,
-                "shortlist_file": "missing.json",
-                "shortlist_max_age_days": 8,
-            }
-        },
-        logger=Mock(),
-        _get_weekly_selector=AsyncMock(),
-    )
-    assert await TradingAgent._resolve_watchlist(agent) == []
-    agent._get_weekly_selector.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -133,6 +117,7 @@ async def test_discovery_bootstrap_and_reconciliation_failure(tmp_path, monkeypa
                 {
                     "generated_at": datetime.now(UTC).isoformat(),
                     "status": "SUCCESS",
+                    "run_id": "fixture",
                     "new_candidates": [],
                 }
             )
@@ -323,7 +308,7 @@ async def test_nightly_production_callback_uses_frozen_gap_and_available_history
         backend.discovery.news_for.side_effect = RuntimeError("news unavailable")
     from core.discovery.shortlist import publish
 
-    publish(backend.discovery.path, [candidate], {})
+    publish(backend.discovery.path, [candidate], {"all_ranked": {"T29": candidate}})
     bars = [
         OHLCVBar(
             timestamp=datetime.now(UTC).isoformat(),
@@ -336,9 +321,7 @@ async def test_nightly_production_callback_uses_frozen_gap_and_available_history
         for _ in range(250 if long_history else 20)
     ]
     client.get_equity_historicals.return_value = bars
-    monkeypatch.setattr(
-        "core.exits.trail_manager.completed_bars", lambda data, **_: data
-    )
+    monkeypatch.setattr("core.data.daily.completed_bars", lambda data, **_: data)
     technical = {"momentum_blend": 0.01, "r5": 0.01, "rsi14": 50}
     monkeypatch.setattr(
         "core.discovery.features.technical_features", lambda *_: technical
@@ -364,10 +347,17 @@ async def test_nightly_production_callback_uses_frozen_gap_and_available_history
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["BUY", "ADD_TO_POSITION", "SELL", "ROTATE"])
-@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize(
+    "action,fallback,discovery",
+    [
+        (action, fallback, None)
+        for action in ("BUY", "ADD_TO_POSITION", "SELL", "ROTATE")
+        for fallback in (False, True)
+    ]
+    + [("BUY", False, "republished"), ("BUY", False, "malformed")],
+)
 async def test_main_cycle_reaches_each_execution_action(
-    tmp_path, monkeypatch, action, fallback
+    tmp_path, monkeypatch, action, fallback, discovery
 ):
     from test_backend_safety import build
     from test_p0_safety import decision, portfolio
@@ -384,7 +374,7 @@ async def test_main_cycle_reaches_each_execution_action(
     agent._is_market_open = Mock(return_value=True)
     agent._discovery_task = agent._nightly_task = None
     agent._cached_watchlist_date, agent._cached_watchlist = "", []
-    agent._resolve_watchlist = AsyncMock(return_value=["NEW"])
+    agent._resolve_legacy_watchlist = AsyncMock(return_value=["NEW"])
     quotes = {
         t: EquityQuote(
             ticker=t,
@@ -418,7 +408,33 @@ async def test_main_cycle_reaches_each_execution_action(
         daily_total=lambda: 0.0, monthly_total=lambda: 0.0
     )
     backend.monitor, backend.reconcile = AsyncMock(), AsyncMock(return_value=True)
-    backend.evidence_for = Mock(return_value={})
+    if discovery:
+        from test_discovery import cohort
+
+        from core.discovery.divergence import score_cohort
+        from core.discovery.shortlist import publish
+
+        agent.config["discovery"]["enabled"] = True
+        backend.discovery = SimpleNamespace(
+            path=tmp_path / "shortlist.json", cfg=agent.config["discovery"]
+        )
+        if discovery == "malformed":
+            backend.discovery.path.write_text(
+                '{"status":"SUCCESS","new_candidates":[{}]}'
+            )
+        else:
+            ranked = score_cohort(cohort(), agent.config["discovery"], "fixture")
+            candidate = dict(ranked["T29"], ticker="NEW")
+            metadata = {"all_ranked": {"NEW": candidate}}
+            snapshot = publish(backend.discovery.path, [candidate], metadata)
+
+            async def replace_during_ingest(*args):
+                publish(backend.discovery.path, [], {"all_ranked": {}})
+                return agent.ingest.ingest.return_value
+
+            agent.ingest.ingest.side_effect = replace_during_ingest
+    else:
+        backend.evidence_for = Mock(return_value={})
     if action == "SELL":
         from core.position.manager import ExitSignal
 
@@ -441,10 +457,12 @@ async def test_main_cycle_reaches_each_execution_action(
         ),
     )
     agent.executor = SimpleNamespace(
+        daily_entry_count=Mock(return_value=0),
         execute=AsyncMock(
             return_value=ExecutionResult(ticker="NEW", status="SKIPPED", dry_run=True)
-        )
+        ),
     )
+    agent.earnings_calendar.get_upcoming = Mock(return_value=None)
     if fallback:
         agent.decision_engine.review_exit.return_value = decision(
             "HOLD", is_fallback=True
@@ -453,6 +471,17 @@ async def test_main_cycle_reaches_each_execution_action(
             "IGNORE", ticker="NEW", is_fallback=True
         )
     await agent._run_cycle(CycleType.MID)
+    if discovery:
+        agent._resolve_legacy_watchlist.assert_not_awaited()
+        if discovery == "malformed":
+            agent.decision_engine.make_decision.assert_not_awaited()
+            agent.decision_engine.review_exit.assert_awaited_once()
+            assert backend.health.state["discovery_handoff"]["error"]
+            return
+        prompt = agent.decision_engine.make_decision.await_args
+        assert prompt.args[0] == "NEW"
+        assert prompt.kwargs["evidence"]["discovery_run_id"] == snapshot["run_id"]
+        assert prompt.kwargs["evidence"]["gap_z"] == candidate["gap_z"]
     if action == "SELL":
         agent.decision_engine.review_exit.assert_awaited_once()
     if fallback:
@@ -540,6 +569,7 @@ async def test_weekly_bootstrap_detects_missed_run_inside_age_limit(
     payload = {
         "generated_at": "2026-11-09T13:00:00+00:00",
         "status": "SUCCESS",
+        "run_id": "fixture",
         "new_candidates": [],
     }
     backend.discovery.path.write_text(json.dumps(payload))

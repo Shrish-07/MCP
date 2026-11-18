@@ -1,4 +1,4 @@
-"""Weekly news fetcher with Finnhub integration, rate limiting, and caching."""
+"""Shared Finnhub windowed company news for discovery and weekly selection."""
 
 from __future__ import annotations
 
@@ -13,9 +13,10 @@ from pathlib import Path
 import httpx
 
 from models.news import NewsItem
-from utils.rate_limit import RateLimiter, finnhub_limiter
+from utils.persistence import atomic_json
+from utils.rate_limit import finnhub_limiter
 
-logger = logging.getLogger("robinhood-agent.core.weekly.news")
+logger = logging.getLogger("robinhood-agent.core.data.company_news")
 
 _FINNHUB_COMPANY_NEWS = "https://finnhub.io/api/v1/company-news"
 
@@ -24,8 +25,8 @@ _FINNHUB_COMPANY_NEWS = "https://finnhub.io/api/v1/company-news"
 # every outbound HTTP component obeys the same Finnhub free-tier budget.
 
 
-class WeeklyNewsFetcher:
-    """Fetch weekly news from Finnhub with rate limiting, retries, and caching."""
+class CompanyNewsFetcher:
+    """Fetch explicit company-news windows with shared rate limiting and caching."""
 
     def __init__(
         self,
@@ -50,7 +51,9 @@ class WeeklyNewsFetcher:
         if self._cache_file.exists():
             try:
                 with open(self._cache_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    cached = json.load(f)
+                    if isinstance(cached, dict):
+                        return cached
             except Exception as exc:
                 self.logger.exception(
                     "weekly_news_cache_load_failed: %s",
@@ -62,8 +65,7 @@ class WeeklyNewsFetcher:
     def _save_cache(self) -> None:
         """Save cache to disk."""
         try:
-            with open(self._cache_file, "w", encoding="utf-8") as f:
-                json.dump(self._cache, f, indent=2)
+            atomic_json(self._cache_file, self._cache, backup=False)
         except Exception as exc:
             self.logger.exception(
                 "weekly_news_cache_save_failed: %s", type(exc).__name__, exc_info=False
@@ -90,8 +92,8 @@ class WeeklyNewsFetcher:
     ) -> list[NewsItem]:
         """Fetch company news for a symbol with rate limiting, retries, and caching.
 
-        Returns an empty list (not an exception) on failure so callers can
-        treat the ticker as neutral (score 0.0).
+        Strict callers require a complete provider response and surface failures.
+        The legacy selector treats unavailable responses as empty.
         """
         if not self._api_key:
             if strict:
@@ -102,11 +104,20 @@ class WeeklyNewsFetcher:
         to_date = to_date or date.today()
         from_date = from_date or (to_date - timedelta(days=self.lookback_days))
         cache_key = f"{symbol.upper()}_{from_date.isoformat()}_{to_date.isoformat()}"
+        if strict:
+            cache_key += "_strict"
 
         cached = self._cache.get(cache_key)
-        if cached and self._is_cache_fresh(cached):
-            self.logger.debug("weekly_news cache hit symbol=%s", symbol)
-            return [NewsItem.model_validate(item) for item in cached.get("items", [])]
+        if isinstance(cached, dict) and self._is_cache_fresh(cached):
+            try:
+                items = cached["items"]
+                if isinstance(items, list):
+                    self.logger.debug("company_news cache hit symbol=%s", symbol)
+                    return [NewsItem.model_validate(item) for item in items]
+            except (KeyError, ValueError):
+                self.logger.warning(
+                    "company_news cache entry invalid symbol=%s", symbol
+                )
 
         url = (
             f"{_FINNHUB_COMPANY_NEWS}?symbol={symbol.upper()}"
@@ -214,7 +225,9 @@ class WeeklyNewsFetcher:
         for symbol, result in zip(symbols, results):
             if isinstance(result, Exception):
                 self.logger.error(
-                    "weekly_news universe fetch failed symbol=%s: %s", symbol, result
+                    "company_news universe_fetch_failed symbol=%s type=%s",
+                    symbol,
+                    type(result).__name__,
                 )
                 news_dict[symbol] = []
             else:
@@ -223,14 +236,3 @@ class WeeklyNewsFetcher:
 
         self.logger.info("weekly_news universe complete symbols=%d", len(news_dict))
         return news_dict
-
-
-async def fetch_weekly_news(
-    symbols: list[str], lookback_days: int = 7
-) -> dict[str, list[NewsItem]]:
-    """Convenience function: fetch weekly news for multiple symbols."""
-    fetcher = WeeklyNewsFetcher(lookback_days=lookback_days)
-    return await fetcher.fetch_news_for_universe(symbols)
-
-
-__all__ = ["RateLimiter", "WeeklyNewsFetcher"]

@@ -17,6 +17,11 @@ def parse_universe(text, *, as_of=None):
     rows = list(csv.DictReader(io.StringIO(text)))
     constituents = []
     for row in rows:
+        if not all(
+            isinstance(row.get(key), str) and row[key].strip()
+            for key in ("Symbol", "Security", "GICS Sector")
+        ):
+            raise ValueError("invalid constituent source row")
         ticker = PositionRecord.valid_ticker(row["Symbol"])
         constituents.append(
             {"ticker": ticker, "name": row["Security"], "sector": row["GICS Sector"]}
@@ -36,18 +41,28 @@ def parse_universe(text, *, as_of=None):
 
 def load_universe(path, max_age_days=14, now=None):
     value = json.loads(Path(path).read_text(encoding="utf-8"))
-    age = (
-        (now or datetime.now(UTC)) - datetime.fromisoformat(value["as_of"])
-    ).total_seconds() / 86400
+    try:
+        age = (
+            (now or datetime.now(UTC)) - datetime.fromisoformat(value["as_of"])
+        ).total_seconds() / 86400
+        rows = value["constituents"]
+        if not isinstance(rows, list):
+            raise TypeError("expected constituent list")
+        symbols = [PositionRecord.valid_ticker(row["ticker"]) for row in rows]
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("invalid universe snapshot") from exc
     if (
         not 0 <= age <= max_age_days
-        or not value.get("source")
-        or not value.get("version")
+        or not isinstance(value.get("source"), str)
+        or not value["source"].strip()
+        or not isinstance(value.get("version"), str)
+        or not value["version"].strip()
     ):
         raise ValueError("universe stale or missing provenance")
-    symbols = [PositionRecord.valid_ticker(r["ticker"]) for r in value["constituents"]]
     if len(set(symbols)) != len(symbols) or not 480 <= len(symbols) <= 520:
         raise ValueError("invalid universe")
+    for row, symbol in zip(rows, symbols):
+        row["ticker"] = symbol
     return value
 
 

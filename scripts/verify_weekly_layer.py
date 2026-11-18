@@ -10,10 +10,11 @@ if __name__ == "__main__":
         [
             sys.executable,
             "-B",
-            str(root / "docs/verification/run_offline_audit_2026-11-12.py"),
+            str(root / "scripts/run_offline_tests.py"),
             "tests/test_ticker_selector.py",
             "tests/test_weekly_e2e.py",
             "tests/test_discovery.py",
+            "tests/test_discovery_pipeline.py",
             "tests/test_sentiment_unit.py",
         ],
         cwd=root,

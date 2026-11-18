@@ -329,7 +329,7 @@
       "exhaustion_max": 0.15
     },
     "schedule": {
-      "// feature_hour_et": "Daily feature and held-position maintenance hour in New York time (0-23) when discovery is enabled. Otherwise held maintenance runs at 20:00 ET.",
+      "// feature_hour_et": "Daily discovery feature refresh hour in New York time (0-23). Held-position maintenance has its own 20:00 ET job.",
       "feature_hour_et": 20,
       "// rank_day": "APScheduler day-of-week expression for discovery ranking, such as sun. Startup uses the same schedule to detect a missed run.",
       "rank_day": "sun",

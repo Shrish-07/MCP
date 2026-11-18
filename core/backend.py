@@ -4,6 +4,9 @@ import asyncio
 import logging
 from datetime import UTC, datetime
 
+from core.data.company_news import CompanyNewsFetcher
+from core.discovery.evidence import ranked_evidence
+from core.discovery.shortlist import load_shortlist
 from core.exits.exit_state import graduate
 from core.exits.trail_manager import executable_mark, update_trail
 from core.position.manager import StateIntegrityError
@@ -35,18 +38,30 @@ class Backend:
         if agent.config.get("discovery", {}).get("enabled"):
             from core.data.sentiment import get_sentiment_model
             from core.discovery.pipeline import Discovery
-            from core.weekly.news import WeeklyNewsFetcher
 
             self.discovery = Discovery(
                 self.pm._path.parent.parent,
                 agent.config,
                 agent.mcp_client,
                 self.pm,
-                WeeklyNewsFetcher(cache_max_age_hours=self.news_cache_hours),
+                CompanyNewsFetcher(cache_max_age_hours=self.news_cache_hours),
                 get_sentiment_model,
             )
 
-    def evidence_for(self, ticker, metrics=None, quote=None):
+    def read_discovery_shortlist(self):
+        if self.discovery is None:
+            return None
+        try:
+            return load_shortlist(
+                self.discovery.path, self.discovery.cfg["shortlist_max_age_days"]
+            )
+        except (OSError, ValueError, OverflowError) as exc:
+            logging.getLogger(__name__).debug(
+                "discovery_shortlist_unavailable type=%s", type(exc).__name__
+            )
+            return None
+
+    def evidence_for(self, ticker, metrics=None, quote=None, *, snapshot=None):
         import hashlib
         import json
 
@@ -98,26 +113,15 @@ class Backend:
             "pending_orders": self.pm.pending(ticker),
             "interpretation": "Measured facts only. Orientation, not a recommendation.",
         }
-        if self.discovery:
-            import json
-
-            from core.discovery.shortlist import load_shortlist
-
-            try:
-                snapshot = load_shortlist(
-                    self.discovery.path, self.discovery.cfg["shortlist_max_age_days"]
-                )
-                row = snapshot.get("all_ranked", {}).get(ticker)
-                if row:
-                    facts.update(row)
-                    facts["evidence_ids"].append(snapshot["run_id"] + ":" + ticker)
-                    facts["incremental_opportunity_confirmed"] = facts[
-                        "incremental_opportunity_confirmed"
-                    ] or bool(
-                        any(row["fingerprints"].values()) and row["sentiment_mean"] > 0
-                    )
-            except (OSError, ValueError, KeyError):
-                facts["discovery_quality"] = "unavailable"
+        row = ranked_evidence(snapshot, ticker)
+        if row:
+            facts["evidence_ids"].append(row["discovery_run_id"] + ":" + ticker)
+            facts["incremental_opportunity_confirmed"] |= bool(
+                any(row["fingerprints"].values()) and row["sentiment_mean"] > 0
+            )
+            facts = row | facts
+        elif self.discovery:
+            facts["discovery_quality"] = "unavailable"
         return facts
 
     async def reconcile(self):
@@ -258,7 +262,12 @@ class Backend:
                         )
                         if record is None:
                             continue
-                        stop_crossed = update_trail(record, q, self.agent.config)
+                        try:
+                            stop_crossed = update_trail(record, q, self.agent.config)
+                        except ValueError as exc:
+                            quotes_valid = False
+                            self.health.record("quotes", success=False, error=exc)
+                            continue
                         self.pm.update_record(record)
                         if stop_crossed:
                             record.thesis_invalidated = True
@@ -334,6 +343,7 @@ class Backend:
         from models.decisions import CycleType
 
         monitor = self.agent.config.get("monitor", {})
+        snapshot = self.read_discovery_shortlist()
         for record in self.pm.get_open_records():
             events = due_reviews(
                 record,
@@ -376,7 +386,7 @@ class Backend:
                 if quote is None or not fresh_quote(quote.timestamp, self.agent.config):
                     raise ValueError("review quote stale")
                 price = executable_mark(quote)
-                facts = self.evidence_for(ticker, metrics, quote)
+                facts = self.evidence_for(ticker, metrics, quote, snapshot=snapshot)
                 facts["review_events"] = events
                 signal = ExitSignal(
                     ticker,
@@ -565,7 +575,7 @@ class Backend:
             await self._nightly()
 
     async def _nightly(self):
-        from core.exits.trail_manager import completed_bars, wilder_atr
+        from core.data.daily import completed_bars, wilder_atr
 
         self.health.record("nightly")
         if not await self.reconcile():
@@ -575,10 +585,13 @@ class Backend:
             return
         self.held_features = {}
         failures = []
-        for record in self.pm.get_open_records():
+        snapshot = self.read_discovery_shortlist()
+        records = self.pm.get_open_records()
+        held = {record.ticker for record in records}
+        for record in records:
             try:
                 bars = await self.agent.mcp_client.get_equity_historicals(
-                    record.ticker, span="year"
+                    record.ticker, span="14month"
                 )
                 bars = completed_bars(bars, trailing_only=True)
                 atr = wilder_atr(bars)
@@ -598,10 +611,9 @@ class Backend:
                                 NewsHistory,
                                 collect_news_features,
                             )
-                            from core.weekly.news import WeeklyNewsFetcher
 
                             if self.held_news_fetcher is None:
-                                self.held_news_fetcher = WeeklyNewsFetcher(
+                                self.held_news_fetcher = CompanyNewsFetcher(
                                     cache_max_age_hours=self.news_cache_hours
                                 )
                             model = await asyncio.to_thread(get_sentiment_model)
@@ -661,7 +673,7 @@ class Backend:
                         exits=self.agent.config.get("exits", DEFAULTS["exits"]),
                         trading=self.agent.config.get("trading", {}),
                     )
-                    facts = self.evidence_for(record.ticker)
+                    facts = self.evidence_for(record.ticker, snapshot=snapshot)
                     # A weekly cross section cannot stand in for fresh held news.
                     facts["z_components"] = fresh_news.get("z_components", {})
                     if fresh_news:
@@ -679,9 +691,19 @@ class Backend:
                     ):
                         from core.discovery.divergence import score_fixed_reference
 
-                        comparable_gap = score_fixed_reference(
-                            dict(facts, **feature), entry, cfg
-                        )
+                        try:
+                            comparable_gap = score_fixed_reference(
+                                dict(facts, **feature), entry, cfg
+                            )
+                        except (
+                            KeyError,
+                            TypeError,
+                            ValueError,
+                            ArithmeticError,
+                        ) as exc:
+                            self.health.record(
+                                "discovery_review_evidence", success=False, error=exc
+                            )
                     pead_path = self.pm._path.parent.parent / "data/pead_events.json"
                     try:
                         pead_data = (
@@ -693,30 +715,36 @@ class Backend:
                         pead_data = {}
                         self.health.record("pead_data", success=False, error=exc)
                     best = None
-                    if self.discovery:
-                        from core.discovery.shortlist import load_shortlist
-
+                    if comparable_gap is not None and entry.get("gap_reference"):
+                        facts.update(
+                            gap_z=comparable_gap, gap_reference=entry["gap_reference"]
+                        )
+                    if (
+                        snapshot
+                        and comparable_gap is not None
+                        and entry.get("gap_reference")
+                    ):
+                        candidate = next(
+                            (
+                                row
+                                for row in snapshot["new_candidates"]
+                                if row["ticker"] not in held
+                            ),
+                            None,
+                        )
                         try:
-                            snapshot = load_shortlist(
-                                self.discovery.path,
-                                self.discovery.cfg["shortlist_max_age_days"],
-                            )
-                            candidate = next(iter(snapshot["new_candidates"]), None)
-                            if (
-                                candidate
-                                and comparable_gap is not None
-                                and entry.get("gap_reference")
-                            ):
-                                facts.update(
-                                    gap_z=comparable_gap,
-                                    gap_reference=entry["gap_reference"],
-                                )
+                            if candidate:
                                 best = dict(
                                     candidate,
                                     gap_z=score_fixed_reference(candidate, entry, cfg),
                                     gap_reference=entry["gap_reference"],
                                 )
-                        except (OSError, ValueError) as exc:
+                        except (
+                            KeyError,
+                            TypeError,
+                            ValueError,
+                            ArithmeticError,
+                        ) as exc:
                             self.health.record(
                                 "discovery_review_evidence", success=False, error=exc
                             )
@@ -757,6 +785,9 @@ class Backend:
             )
         except (OSError, ValueError) as exc:
             self.health.record("nightly", success=False, error=exc)
+
+    async def refresh_discovery_features(self):
+        """Refresh only discovery market inputs at the configured feature hour."""
         if self.discovery:
             try:
                 await self.discovery.features()
@@ -773,7 +804,6 @@ class Backend:
 
         from apscheduler.triggers.cron import CronTrigger
 
-        from core.discovery.shortlist import load_shortlist
         from utils.strategy_config import DEFAULTS
 
         if not self.discovery:

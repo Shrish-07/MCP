@@ -28,12 +28,21 @@ def score_fixed_reference(row, entry_evidence, cfg):
     """Comparable held gap against frozen entry-cohort transforms, never a new cohort."""
 
     def z(value, meta):
+        if not math.isfinite(value) or meta["scale"] <= 0:
+            raise ValueError("invalid entry-reference component")
         return (
             max(meta["clip_low"], min(meta["clip_high"], value)) - meta["center"]
         ) / meta["scale"]
 
+    entry_model = entry_evidence.get("model", {}).get("model_name")
+    row_model = row.get("model", {}).get("model_name")
+    if entry_model and row_model and entry_model != row_model:
+        raise ValueError("sentiment model changed since entry")
+    w = entry_evidence.get("gap_weights") or cfg["gap_weights"]
+    if "r21" in row and "r63" in row:
+        short, medium = w["momentum_blend"]
+        row = dict(row, momentum_blend=short * row["r21"] + medium * row["r63"])
     component = {k: z(row[k], v) for k, v in entry_evidence["cohort"].items()}
-    w = cfg["gap_weights"]
     raw = (
         w["sentiment_mean"] * component["sentiment_mean"]
         + w["velocity"] * component["news_velocity"]
@@ -87,6 +96,7 @@ def score_cohort(rows, cfg, reference):
             gap_reference=reference,
             cohort=metadata,
             gap_standardization=gap_meta,
+            gap_weights=dict(w),
         )
         fp = row["fingerprints"]
         arch = cfg["archetypes"]

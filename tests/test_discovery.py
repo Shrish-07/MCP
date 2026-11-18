@@ -1,18 +1,19 @@
 import json
 import math
 import statistics
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from core.data.daily import completed_bars
 from core.discovery.divergence import score_cohort, score_fixed_reference, standardize
 from core.discovery.features import technical_features
 from core.discovery.gates import eligibility
 from core.discovery.news_features import NewsHistory, deduplicate
 from core.discovery.shortlist import load_shortlist, mark_failed, publish, select_new
 from core.discovery.universe import load_universe
-from core.exits.trail_manager import completed_bars
 from models.market_data import EquityQuote, OHLCVBar
 from models.news import NewsItem
 from utils.strategy_config import DEFAULTS
@@ -48,6 +49,15 @@ def test_gap_is_separately_standardized_and_reproducible():
         assert score_fixed_reference(r, r, DEFAULTS["discovery"]) == pytest.approx(
             r["gap_z"]
         )
+
+
+def test_held_reference_keeps_entry_weights_after_settings_change():
+    cfg = DEFAULTS["discovery"]
+    entry = score_cohort(cohort(), cfg, "frozen")["T20"]
+    later = deepcopy(cfg)
+    later["gap_weights"]["sentiment_mean"] = 9
+    later["gap_weights"]["velocity"] = 0
+    assert score_fixed_reference(entry, entry, later) == pytest.approx(entry["gap_z"])
 
 
 @pytest.mark.parametrize("values", [[1] * 20, [1, 2, 3], [1] * 19 + [float("nan")]])

@@ -1,14 +1,8 @@
 # Robinhood authentication and account verification
 
-Updated after the authorized clean-state reset on November 12, 2026.
-
-## Current result
-
-The existing session succeeded for the minimum before-and-after reset check. Each snapshot used one call to accounts, portfolio, holdings and orders. Both snapshots selected the same unique eligible account, produced a consistent portfolio fingerprint, returned complete empty holdings and zero available asset balances, and showed 27 terminal orders with no active orders. Renewal, browser authorization, credential writes and response recording were disabled.
-
-The owner explicitly authorized using the previously confirmed unique Agentic account and initializing its local binding. The reset stored that verified fingerprint in `logs/positions.json`. It was compared in memory and never printed. [Reset evidence](verification/reset_local_2026-11-12.json)
-
-Cash, total value, equity value, both buying-power fields and all returned asset-category values were $0.00. Withdrawable funds, unsettled funds and some liability fields were unavailable. Missing fields remain unavailable.
+The client authenticates and resolves a unique eligible Agentic account.
+Account binding and holdings are verified during runtime reconciliation.
+Prior read-only checks are indexed in the [verification archive](verification/README.md).
 
 ## Authentication storage and loading
 
@@ -18,10 +12,8 @@ Cash, total value, equity value, both buying-power fields and all returned asset
 | Override | `ROBINHOOD_TOKEN_CACHE` is evaluated when the broker module imports. Set a process environment override before Python starts. |
 | Normal config | JSON settings and project-root dotenv loading in `utils.config.load_config`. Dotenv is for API secrets. A token-path value loaded only after module import cannot change the already resolved cache constant. |
 | Secret-free checks | `load_config(include_secrets=False)` skips dotenv and API-secret environment values. The offline preflight uses this path. |
-| Local state | Schema-2 `logs/positions.json`, now empty and bound to the verified account. |
+| Local state | Schema-2 `logs/positions.json` stores a binding after verified reconciliation. |
 | Private-file handling | The token cache is atomically replaced with private permissions. Persistence errors now raise `AuthenticationError`. Pending credentials remain in memory but must be persisted successfully before a later session can use them. |
-
-The current task did not inspect credential or dotenv contents. The existing client handled its cached authentication internally through its normal interface. Public model loading explicitly uses `token=False` and does not require an inference service or a model-provider login.
 
 ## Runtime flow
 

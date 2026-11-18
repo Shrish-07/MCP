@@ -43,7 +43,7 @@ WHAT'S NEW AND IMPORTANT:
       in the project root. The one-time browser login only needs to
       happen once; every subsequent run silently refreshes.
     - Every tool call result flows through the response recorder
-      (mcp/response_recorder.py) via the new capture_direct_mcp_call()
+      (robinhood_mcp/response_recorder.py) via capture_direct_mcp_call()
       adapter, preserving full observability (schema drift detection,
       numeric anomaly detection, credential redaction) without any of the
       subprocess/stdout-specific machinery that no longer applies.
@@ -132,6 +132,7 @@ _SPAN_TO_TIMEDELTA = {
     "3month": timedelta(days=90),
     "6month": timedelta(days=180),
     "year": timedelta(days=365),
+    "14month": timedelta(days=420),
 }
 
 
@@ -783,23 +784,32 @@ class RobinhoodMCPClient:
         else:
             bar_list = []
 
-        mapped_bars = []
-        for item in bar_list:
-            mapped_bars.append(
-                {
-                    "ticker": ticker,
-                    "timestamp": item.get("begins_at") or item.get("timestamp", ""),
-                    "open": float(item.get("open_price") or item.get("open") or 0),
-                    "high": float(item.get("high_price") or item.get("high") or 0),
-                    "low": float(item.get("low_price") or item.get("low") or 0),
-                    "close": float(item.get("close_price") or item.get("close") or 0),
-                    "volume": float(item.get("volume") or 0),
-                }
+        return self._map_bars(ticker, bar_list)
+
+    @staticmethod
+    def _map_bars(ticker, items):
+        if not isinstance(items, list):
+            raise TypeError("historicals bars must be an array")
+        return [
+            OHLCVBar(
+                ticker=ticker,
+                timestamp=item.get("begins_at") or item.get("timestamp", ""),
+                open=float(item.get("open_price") or item.get("open") or 0),
+                high=float(item.get("high_price") or item.get("high") or 0),
+                low=float(item.get("low_price") or item.get("low") or 0),
+                close=float(item.get("close_price") or item.get("close") or 0),
+                volume=float(item.get("volume") or 0),
             )
-        return [OHLCVBar.model_validate(m) for m in mapped_bars]
+            for item in items
+        ]
 
     async def get_equity_historicals_batch(
-        self, tickers: list[str], span: str = "3month", interval: str = "day"
+        self,
+        tickers: list[str],
+        span: str = "3month",
+        interval: str = "day",
+        *,
+        lookback_days: int | None = None,
     ) -> dict[str, list[OHLCVBar]]:
         """Fetch OHLCV bars for up to 10 tickers in a single call.
 
@@ -813,7 +823,11 @@ class RobinhoodMCPClient:
                 "get_equity_historicals_batch accepts at most 10 tickers per call"
             )
 
-        delta = _SPAN_TO_TIMEDELTA.get(span, timedelta(days=90))
+        delta = (
+            timedelta(days=lookback_days)
+            if lookback_days is not None
+            else _SPAN_TO_TIMEDELTA.get(span, timedelta(days=90))
+        )
         end_time = datetime.now(UTC)
         start_time = end_time - delta
 
@@ -827,34 +841,25 @@ class RobinhoodMCPClient:
         parsed = self._extract_json_payload(content)
 
         results_by_ticker: dict[str, list[OHLCVBar]] = {t: [] for t in tickers}
-        if isinstance(parsed, dict) and "data" in parsed:
-            results = parsed["data"].get("results", [])
-            for result in results:
-                symbol = result.get("symbol", "")
-                bar_list = result.get("bars", [])
-                mapped_bars = []
-                for item in bar_list:
-                    mapped_bars.append(
-                        {
-                            "ticker": symbol,
-                            "timestamp": item.get("begins_at")
-                            or item.get("timestamp", ""),
-                            "open": float(
-                                item.get("open_price") or item.get("open") or 0
-                            ),
-                            "high": float(
-                                item.get("high_price") or item.get("high") or 0
-                            ),
-                            "low": float(item.get("low_price") or item.get("low") or 0),
-                            "close": float(
-                                item.get("close_price") or item.get("close") or 0
-                            ),
-                            "volume": float(item.get("volume") or 0),
-                        }
-                    )
-                results_by_ticker[symbol] = [
-                    OHLCVBar.model_validate(m) for m in mapped_bars
-                ]
+        data = parsed.get("data") if isinstance(parsed, dict) else None
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list):
+            raise MCPError("histories unavailable or malformed")
+        seen = set()
+        for item in results:
+            symbol = item.get("symbol") if isinstance(item, dict) else None
+            if not isinstance(symbol, str) or symbol not in results_by_ticker:
+                continue
+            if symbol in seen:
+                results_by_ticker[symbol] = []
+                continue
+            seen.add(symbol)
+            try:
+                results_by_ticker[symbol] = self._map_bars(symbol, item.get("bars", []))
+            except (AttributeError, OverflowError, TypeError, ValueError) as exc:
+                self.logger.warning(
+                    "histories_rejected ticker=%s type=%s", symbol, type(exc).__name__
+                )
         return results_by_ticker
 
     async def get_equity_tradability(self, ticker: str) -> dict[str, Any]:

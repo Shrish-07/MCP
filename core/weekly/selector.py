@@ -12,9 +12,9 @@ from typing import Any
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from core.data.company_news import CompanyNewsFetcher
 from core.data.sentiment import get_sentiment_model
 from core.position.manager import PositionManager
-from core.weekly.news import WeeklyNewsFetcher
 from core.weekly.ticker_selector import select_universe
 from utils.persistence import atomic_json
 
@@ -24,8 +24,11 @@ logger = logging.getLogger("robinhood-agent.core.weekly.selector")
 class WeeklySelector:
     """Orchestrates weekly ticker selection based on sentiment analysis."""
 
-    def __init__(self, config: dict[str, Any], position_manager=None) -> None:
+    def __init__(
+        self, config: dict[str, Any], position_manager=None, *, new_names_only=False
+    ) -> None:
         self.config = config
+        self.new_names_only = new_names_only
         self.logger = logger
         self.enabled = config.get("sentiment_selection", {}).get("enabled", False)
 
@@ -46,7 +49,7 @@ class WeeklySelector:
             if position_manager is not None
             else PositionManager(config=config)
         )
-        self.news_fetcher = WeeklyNewsFetcher(
+        self.news_fetcher = CompanyNewsFetcher(
             lookback_days=self.lookback_days,
             cache_max_age_hours=ss.get("cache_max_age_hours", 24),
         )
@@ -324,13 +327,11 @@ class WeeklySelector:
 
             # The integrated contract counts NEW candidates independently of
             # holdings. Standalone legacy callers keep their old contract.
-            discovery_cfg = self.config.get("discovery", {})
-            new_contract = bool(discovery_cfg.get("shortlist"))
-            if new_contract:
+            if self.new_names_only:
                 scores = {t: s for t, s in scores.items() if t not in current_holdings}
 
             selected = select_universe(
-                held_tickers=set() if new_contract else current_holdings,
+                held_tickers=set() if self.new_names_only else current_holdings,
                 scored_candidates=scores,
                 universe_size=self.universe_size,
                 max_positions=self.max_positions,
@@ -409,26 +410,3 @@ class WeeklySelector:
     def get_candidate_universe(self) -> list[str]:
         """Get the candidate universe."""
         return list(self.candidate_universe)
-
-
-# Module-level singleton
-_weekly_selector: WeeklySelector | None = None
-
-
-async def get_weekly_selector(
-    config: dict[str, Any], position_manager=None
-) -> WeeklySelector:
-    """Get or create the weekly selector singleton."""
-    global _weekly_selector
-    if _weekly_selector is None:
-        _weekly_selector = WeeklySelector(config, position_manager=position_manager)
-        await _weekly_selector.initialize()
-    if position_manager is not None:
-        _weekly_selector.position_manager = position_manager
-    return _weekly_selector
-
-
-async def run_weekly_selection(config: dict[str, Any]) -> list[str]:
-    """Convenience function to run weekly selection."""
-    selector = await get_weekly_selector(config)
-    return await selector.run_selection()

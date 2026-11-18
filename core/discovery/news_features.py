@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import re
 import statistics
@@ -11,6 +12,12 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from utils.persistence import atomic_json
+
+logger = logging.getLogger(__name__)
+
+
+class SparseNewsError(ValueError):
+    """A valid fetch cannot support the minimum sentiment windows."""
 
 
 def story_keys(item):
@@ -53,14 +60,33 @@ class NewsHistory:
         self._state = None
         self._dirty = set()
 
+    def _load(self):
+        try:
+            state = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(state, dict) and isinstance(state.get("tickers"), dict):
+                return state
+            raise ValueError("invalid headline history envelope")
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as exc:
+            logger.warning("sentiment_history_unavailable type=%s", type(exc).__name__)
+        return {"tickers": {}}
+
     def flush(self):
         if self._state is None or not self._dirty:
             return
-        latest = (
-            json.loads(self.path.read_text()) if self.path.exists() else {"tickers": {}}
-        )
+        latest = self._load()
         for ticker in self._dirty:
-            latest["tickers"][ticker] = self._state["tickers"][ticker]
+            updated = self._state["tickers"][ticker]
+            previous = latest["tickers"].get(ticker)
+            previous_fetch = (
+                previous.get("last_fetch") if isinstance(previous, dict) else None
+            )
+            if (
+                not isinstance(previous_fetch, str)
+                or previous_fetch <= updated["last_fetch"]
+            ):
+                latest["tickers"][ticker] = updated
         atomic_json(self.path, latest)
         self._dirty.clear()
 
@@ -83,14 +109,23 @@ class NewsHistory:
         ):
             raise ValueError("incomplete/invalid sentiment inference")
         if self._state is None:
-            self._state = (
-                json.loads(self.path.read_text())
-                if self.path.exists()
-                else {"tickers": {}}
-            )
+            self._state = self._load()
         state = self._state
-        old = state["tickers"].get(ticker, {"stories": [], "coverage_start": None})
-        merged = {s["story_id"]: s for s in old["stories"]}
+        old = state["tickers"].get(ticker)
+        if not isinstance(old, dict) or not isinstance(old.get("stories"), list):
+            old = {"stories": [], "coverage_start": None}
+        try:
+            merged = {
+                s["story_id"]: s
+                for s in old["stories"]
+                if datetime.fromisoformat(s["timestamp"]).utcoffset() is not None
+                and isinstance(s["model"], dict)
+                and type(s["score"]) in (float, int)
+                and -1 <= s["score"] <= 1
+                and isinstance(s["source"], str)
+            }
+        except (KeyError, TypeError, ValueError):
+            merged = {}
         for item, score in zip(unique, scores):
             story_id = min(story_keys(item))
             merged[story_id] = {
@@ -150,7 +185,7 @@ class NewsHistory:
             < now - timedelta(days=7)
         ]
         if not current or not prior or not baseline:
-            raise ValueError("sparse ticker sentiment/baseline unavailable")
+            raise SparseNewsError("sparse ticker sentiment/baseline unavailable")
         weights = [
             2
             if datetime.fromisoformat(s["timestamp"]) >= now - timedelta(days=3)
@@ -216,7 +251,9 @@ class NewsHistory:
         }
 
 
-async def collect_news_features(history, fetcher, model, ticker, *, now=None):
+async def collect_news_features(
+    history, fetcher, model, ticker, *, now=None, persist=True
+):
     now = now or datetime.now(UTC)
     start = now - timedelta(days=45)
     info = model.get_model_info()
@@ -230,5 +267,11 @@ async def collect_news_features(history, fetcher, model, ticker, *, now=None):
         model.score_headlines, [n.headline for n in unique]
     )
     return history.update(
-        ticker, items, scores, info, now=now, coverage_start=start.isoformat()
+        ticker,
+        items,
+        scores,
+        info,
+        now=now,
+        coverage_start=start.isoformat(),
+        persist=persist,
     )

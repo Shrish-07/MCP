@@ -22,9 +22,11 @@ experimental research software:
 
 ## Local data & privacy
 
-The agent writes **only to your own machine**. There is no telemetry and no
-network call except to Anthropic, Finnhub, and Robinhood. Files it creates
-and which must never be committed:
+The agent writes runtime files locally. Robinhood supplies brokerage and
+market data, Finnhub supplies news, and Anthropic supplies decision reviews.
+Discovery can retrieve the public constituent CSV from GitHub and download
+its pinned sentiment weights from Hugging Face. The offline test runner
+blocks connections beyond loopback.
 
 | Path | Contents | Why it's sensitive |
 |---|---|---|
@@ -45,6 +47,5 @@ else.
 - API keys enter through environment variables loaded from `.env`
   (`ANTHROPIC_API_KEY`, `FINNHUB_API_KEY`). Robinhood OAuth credentials are
   loaded from the private cache described in [the authentication guide](docs/AUTHENTICATION.md).
-- No secret is ever written to logs or traces; the response recorder
-  redacts bearer headers, tokens, and key/value pairs before persisting,
-  and masks `account_number` in trace arguments.
+- The response recorder redacts known bearer, token, and key fields and masks
+  `account_number` in trace arguments. Treat the trace files as sensitive.

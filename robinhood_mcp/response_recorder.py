@@ -1,31 +1,9 @@
 #!/usr/bin/env python3
-"""
-Robinhood MCP Response Recorder — True Observability Layer.
+"""Robinhood MCP trace recording, schema diagnostics and trace queries.
 
-Records the exact raw data returned by every Robinhood MCP call
-*before* any parsing, validation, transformation, coercion, trimming,
-or business logic occurs.
-
-Design guarantees:
-  - Raw stdout / stderr are stored byte-for-byte identical to what
-    Python received from subprocess.communicate().
-  - Any cleaned / trimmed / parsed versions are stored SEPARATELY.
-  - No normalization, no unicode normalization, no whitespace
-    normalization, no newline conversion — ever — on raw fields.
-  - Recorder failures NEVER stop trading.
-  - Thread-safe asyncio JSONL appending with proper locking.
-  - Automatic rotation (100 MB per file, newest 20 kept as .gz).
-  - Persistent schema history across Python sessions.
-  - Recursive numeric anomaly detection (every field, full JSON path).
-  - Multi-stage parsing diagnostics (every stage stored independently).
-  - Full subprocess failure capture (stdout retained on non‑zero exit).
-  - HTML diagnostics with metadata extraction.
-  - Differentiated empty‑response classification.
-  - Rich developer‑utility "show_*" functions.
-
-Usage is automatic: every call routed through `_call_with_retry()`
-in `mcp/robinhood_client.py` triggers `capture_mcp_call()`.
-
+The client records direct responses through capture_direct_mcp_call.
+The subprocess trace helpers support archived diagnostic records. Both
+formats redact known credential patterns before appending to local JSONL.
 """
 
 from __future__ import annotations

@@ -4,11 +4,12 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from core.data.daily import completed_bars
 from core.data.metrics import MetricsEngine
 from core.data.news import NewsFetcher
 from core.discovery.news_features import NewsHistory
 from core.exits.exit_evidence import due_reviews
-from core.exits.trail_manager import completed_bars, executable_mark
+from core.exits.trail_manager import executable_mark
 from models.market_data import OHLCVBar
 
 
@@ -51,7 +52,7 @@ async def test_news_retry_ordering_intraday_and_general_failure(tmp_path, monkey
 
 @pytest.mark.asyncio
 async def test_chronological_drawdown_and_completed_volume(monkeypatch):
-    import core.exits.trail_manager as trail
+    import core.data.daily as trail
     from utils.market_calendar import _NYSE
 
     now = datetime(2026, 11, 16, 15, tzinfo=UTC)

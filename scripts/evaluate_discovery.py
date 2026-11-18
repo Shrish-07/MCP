@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from core.evaluation import evaluate
+from core.discovery.evaluation import evaluate
 from utils.persistence import atomic_json
 
 if __name__ == "__main__":

@@ -35,6 +35,40 @@ async def test_tradability_requires_a_matching_broker_symbol():
     assert (await c.get_equity_tradability("ABC"))["tradeable"] is False
 
 
+@pytest.mark.asyncio
+async def test_history_batch_preserves_valid_symbols_and_requested_range():
+    valid = {
+        "timestamp": "2026-11-13",
+        "open": 10,
+        "high": 11,
+        "low": 9,
+        "close": 10,
+        "volume": 20,
+    }
+    c = client(
+        {
+            "data": {
+                "results": [
+                    {"symbol": "ABC", "bars": [valid]},
+                    {"symbol": "DEF", "bars": [dict(valid, close="broken")]},
+                    {"symbol": "EXTRA", "bars": [valid]},
+                ]
+            }
+        }
+    )
+    histories = await c.get_equity_historicals_batch(["ABC", "DEF"], lookback_days=420)
+    assert list(histories) == ["ABC", "DEF"]
+    assert histories["ABC"][0].close == 10
+    assert histories["DEF"] == []
+    args = c._call_tool_with_retry.await_args.args[1]
+    from datetime import datetime
+
+    assert (
+        datetime.fromisoformat(args["end_time"])
+        - datetime.fromisoformat(args["start_time"])
+    ).days == 420
+
+
 @pytest.mark.parametrize(
     "payload",
     [

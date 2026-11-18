@@ -365,36 +365,3 @@ async def test_async_response_recording_keeps_each_json_line(tmp_path, monkeypat
     assert sorted(
         json.loads(line)["fixture_index"] for line in path.read_text().splitlines()
     ) == list(range(10))
-
-
-@pytest.mark.parametrize(
-    "compatibility,canonical",
-    [
-        ("data_ingest", "core.data.ingest"),
-        ("decision_engine", "core.decision.engine"),
-        ("metrics", "core.data.metrics"),
-        ("news_fetch", "core.data.news"),
-        ("pnl_tracker", "core.position.pnl_tracker"),
-        ("position_manager", "core.position.manager"),
-        ("sentiment_model", "core.data.sentiment"),
-        ("ticker_selector", "core.weekly.ticker_selector"),
-        ("weekly_news", "core.weekly.news"),
-        ("weekly_selector", "core.weekly.selector"),
-    ],
-)
-def test_compatibility_modules_preserve_public_symbol_identity(
-    compatibility, canonical
-):
-    import importlib
-
-    implementation = importlib.import_module(canonical)
-    wrapper = importlib.import_module("core." + compatibility)
-    names = getattr(
-        implementation,
-        "__all__",
-        [name for name in vars(implementation) if not name.startswith("_")],
-    )
-    assert set(wrapper.__all__) == set(names)
-    assert all(
-        getattr(wrapper, name) is getattr(implementation, name) for name in names
-    )

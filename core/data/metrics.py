@@ -26,7 +26,7 @@ class MetricsEngine:
         """Async — pulls RSI, MACD, Bollinger, ATR, SMA, and fundamentals
         directly from Robinhood's MCP tools, keeping only return/drawdown
         calculations as local arithmetic on the bars parameter."""
-        from core.exits.trail_manager import completed_bars
+        from core.data.daily import completed_bars
 
         bars = completed_bars(bars, require_fresh=False) if bars else []
         if not bars:

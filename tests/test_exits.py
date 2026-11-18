@@ -2,8 +2,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from core.data.daily import wilder_atr
 from core.exits.exit_state import finish_review, graduate
-from core.exits.trail_manager import update_trail, wilder_atr
+from core.exits.trail_manager import update_trail
 from core.simulation import replay
 from models.market_data import EquityQuote, OHLCVBar
 from models.portfolio import PositionRecord
@@ -76,6 +77,16 @@ def test_bad_quote_does_not_mutate_peak():
             {},
         )
     assert r.peak_price == 100
+
+
+def test_trail_uses_configured_quote_age():
+    now = datetime.now(UTC)
+    mark = quote(105, (now - timedelta(seconds=75)).isoformat())
+    holding = record()
+    with pytest.raises(ValueError, match="stale"):
+        update_trail(holding, mark, {}, now=now)
+    update_trail(holding, mark, {"execution": {"quote_max_age_seconds": 90}}, now=now)
+    assert holding.peak_price == 105
 
 
 def test_wilder_atr_uses_true_range_and_smoothing():

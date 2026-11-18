@@ -3,20 +3,13 @@
 See [Authentication and account verification](AUTHENTICATION.md) for the cache,
 renewal flow, account binding and local-to-Docker persistence procedure.
 
-The authorized November 12 reset is complete. The journal store contains zero
-old entries, the schema-2 local portfolio contains zero positions, and the local
-account binding matches the uniquely selected owner-confirmed account. Broker
-reads before and after the reset returned zero observed assets and active
-orders, with 27 terminal historical orders. No broker state changed.
-
-Old canonical execution history remains available for audit/recovery. A reset
-baseline excludes those old fill IDs from journal reconstruction. Static
-universe inputs and configured watchlists are intentional inputs rather than
-historical research memory and were preserved.
+A reset baseline can exclude prior fills from journal reconstruction while
+retaining execution history for audit and recovery. The universe snapshots
+and configured watchlists supply independent research inputs.
 
 ## A. Startup
 
-Run `python main.py` from the repository root. The entry point takes an instance lock and starts `TradingAgent.start`. Configuration merges defaults and `config/settings.json`, then loads environment settings with dotenv. Validation errors prevent unsafe startup. The broker client reuses a valid cached OAuth token, attempts refresh when needed, and can perform dynamic registration and browser PKCE authentication on interactive startup. It selects exactly one eligible agentic account. The current clean state is already bound to the verified account. Subsequent reconciliation checks that fingerprint before accepting holdings.
+Run `python main.py` from the repository root. The entry point takes an instance lock and starts `TradingAgent.start`. Configuration merges defaults and `config/settings.json`, then loads environment settings with dotenv. Validation errors prevent unsafe startup. The broker client reuses a valid cached OAuth token, attempts refresh when needed, and can perform dynamic registration and browser PKCE authentication on interactive startup. It selects exactly one eligible agentic account. Reconciliation establishes or verifies the stored account fingerprint before accepting holdings.
 
 Position and order state load before startup reconciliation. Persisted pending intents retain their state across restart. A complete, matching-account holdings read and order reconciliation are required before holdings are replaced. Startup installs the scheduler and monitor. Actual submissions require explicit live-release approval, dry run disabled, a healthy applicable execution gate, and an absent manual stop file. A failed dependency read blocks the operation that depends on it. An invalid OAuth session requires restoration before broker actions can resume.
 
@@ -36,19 +29,42 @@ Position and order state load before startup reconciliation. Persisted pending i
 
 ## C. Discovery L0–L6
 
-| Layer | Calculation and outcome |
+| Stage and owner | Input → output |
 | --- | --- |
-| L0 Universe | `core/discovery/universe.py` loads the versioned snapshot and its provenance. |
-| L1 Eligibility | `gates.eligibility` checks price, liquidity, annual volatility, quote validity and history. |
-| L2 Technical | At least 250 completed sessions. Returns use current close divided by the close n sessions earlier minus one for 5, 21, 63 and 126 sessions. Momentum is 0.6 × 21-session return + 0.4 × 63-session return. Features include 252-session high and runway, SMA20 and slope versus the prior SMA20, share of closes above SMA20, up-day volume share, recent/prior down-day volume, range and volatility contraction, distance from SMA20, Wilder RSI14 and ATR14, realized annual volatility and 30-session dollar volume. |
-| L2 Fingerprints | F1 requires a positive 63-session return, SMA slope of at least 1%, close at least 97% of SMA20 and a 2–10% pullback from the 30-session high. F2 requires contraction ratios at or below 0.8 for range, volatility and down volume. F3 requires a 5–15% pullback from the 30-session high and down volume ratio at or below 0.8. |
-| L3 News | Deduplicate by article identifier, URL and headline. Use a 7-day recent window, previous 7 days and a preceding 30-day count baseline. Give the newest 3 days twice the weight. Finance sentiment attempts FinSense ModernBERT and then finance DistilBERT. Held reviews use a temporal sentiment delta z-score when supported. |
-| L4 Divergence | Clip each cohort feature at its mean ±3 standard deviations, then standardize. News score is the configured weighted sum of sentiment, velocity and delta z-scores. Price score is the momentum z-score plus weighted 5-session return z-score. Standardize news minus price across the cohort to obtain gap z-score. Persist entry reference data for later comparisons. |
-| L4 Archetypes | A captures lagged favorable news with positive divergence and a technical fingerprint. B captures early inflection with basing and sentiment change. C captures confirmed drift with positive momentum and sentiment, a verified earnings catalyst and at least 3% runway. D marks unfavorable cases. Unclassified symbols may have no archetype. Deciles rank the cohort from low to high. |
-| L5 Shortlist | Apply ranking, bucket quotas and deterministic ties to the new pool, default ten. Exclude held names, which get their own evaluation path. A failed refresh preserves prior data subject to staleness checks. |
-| L6 Evaluation | Give Claude per-symbol candidate or holding context, evidence, roster and cycle type. Discovery is local before the decision step. |
+| L0 · `core/discovery/universe.py` | A public constituent CSV produces a versioned, timestamped ticker snapshot. Ranking attempts a refresh and can reuse a local snapshot within `universe_max_age_days`. Missing, malformed, or stale input must be refreshed before ranking. |
+| L1 · `gates.py` | Completed daily history and a source-timestamped quote are checked against the configured price, dollar-volume, volatility, and history floors. Rejected symbols carry a reason. |
+| L2 · `features.py`, `feature_snapshot.py` | Valid daily bars produce returns, momentum, RSI, ATR, high runway, and F1/F2/F3 fingerprints. The latest feature file and dated snapshots identify the completed NYSE session, universe version, and feature-settings revision. Ranking rebuilds missing, invalid, or superseded snapshots. |
+| L3 · `news_features.py`, `catalysts.py` | Strict company-news windows feed the pinned local sentiment model. Deduplicated headlines produce weighted recent tone, prior-period delta, and velocity against the ticker's earlier headline baseline. Verified earnings evidence is optional. Sparse or failed ticker news is recorded as an exclusion. |
+| L4 · `divergence.py` | Winsorized cohort features produce a weighted news score and price score. Their difference is standardized again, then labeled A (lagged news), B (early inflection), C (confirmed drift), D (avoid-side), or unclassified. Cohorts that are too small or degenerate stop publication. |
+| L5 · `shortlist.py` | Rank eligible A/B/C names within the configured pools, use candidate memory only for ties, and apply the new-name quota after excluding holdings. Publish one atomic generation with its cutoff, ranks, exclusions, and run ID. A failed refresh preserves the last success through its age limit. |
+| L6 · `evidence.py`, `main.py`, `evaluation.py` | A decision cycle pins one shortlist generation for candidate selection and per-symbol prompt evidence. Each candidate still needs current metrics and a fresh quote. Separate offline paired evaluation takes chronological discovery and baseline outcomes under matched rules. |
 
-These scores express a hypothesis about relative news and price behavior. The repository does not establish its out-of-sample predictive value.
+`discovery.schedule.feature_hour_et` controls the daily feature job.
+`rank_day` and `rank_hour_et` control weekly ranking. These jobs use New York
+time. Startup checks for a missed weekly run. Held-position maintenance runs
+at 20:00 ET independently of feature refresh. For technical features,
+momentum blends 21- and 63-session returns. F1 measures a pullback in a
+positive trend, F2 measures range and volume contraction, and F3 measures
+a decline with weaker down-day volume. The settings file documents each
+threshold.
+
+Discovery uses broker market data, Finnhub headlines, and local sentiment
+inference. The L0–L5 pipeline has no Claude dependency. Claude receives the
+L6 candidate or held-position review after the deterministic stages.
+With discovery enabled and no valid shortlist, scheduled cycles still
+review held positions. With discovery disabled, the legacy weekly
+selector can run when `sentiment_selection.enabled` is true. Its fallbacks
+are the broker watchlist and configured ticker list. Both paths share
+the company-news fetcher under `core.data`.
+
+Use `scripts/evaluate_discovery.py` with a JSON object containing `pairs`
+and `folds`. Each pair supplies discovery and baseline outcomes with
+matching period, capital, risk settings, exit policy, and execution-cost
+model. Each outcome supplies a decision timestamp, feature cutoff,
+outcome-availability timestamp, net return, and cost-known flag. Folds
+supply explicit train-end, test-start, and test-end timestamps. The
+report records paired sample size, average net difference, and an
+approximate interval. Estimating an edge requires actual paired outcomes.
 
 ## D. Claude decision-making
 
@@ -109,7 +125,7 @@ The Anthropic wrapper records usage by attempt, model and rate version. Cost use
 
 ## K. Schedule
 
-Times are New York time by default. Startup reconciles and can catch up the eligible OPEN, MID or CLOSE cycle using the configured times and the NYSE calendar. The fallback decision schedule is 09:35, 12:30 and 15:30. The monitor interval defaults to 15 seconds during regular sessions. Heartbeat runs on the event loop every 30 seconds. The weekday report defaults to 16:05 and nightly maintenance to 20:00. When discovery is enabled, its feature hour sets the nightly maintenance time. The weekly discovery job uses its separate rank day and hour. Enabled discovery supplies new candidates and bootstraps missing, stale or missed-weekly output. Until a valid shortlist is available, only holdings go through review. Startup also recovers missed held-position nightly maintenance. These background tasks start after the safety scheduler. Decision research waits for them. Each ticker receives a fresh quote before its review. Decision cycles share a process-local lock and monitoring runs independently.
+Times are New York time by default. Startup reconciles and can catch up the eligible OPEN, MID or CLOSE cycle using the configured times and the NYSE calendar. The fallback decision schedule is 09:35, 12:30 and 15:30. The monitor interval defaults to 15 seconds during regular sessions. Heartbeat runs on the event loop every 30 seconds. The weekday report defaults to 16:05 and nightly maintenance to 20:00. With discovery enabled, daily feature refresh and weekly ranking have their own schedules. Enabled discovery supplies new candidates and bootstraps missing, stale or missed-weekly output. Until a valid shortlist is available, only holdings go through review. Startup also recovers missed held-position nightly maintenance. These background tasks start after the safety scheduler. Decision research waits for them. Each ticker receives a fresh quote before its review. Decision cycles share a process-local lock and monitoring runs independently.
 
 ## L. Shutdown and restart
 

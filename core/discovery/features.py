@@ -4,7 +4,7 @@ import itertools
 import math
 import statistics as stats
 
-from core.exits.trail_manager import wilder_atr
+from core.data.daily import wilder_atr
 
 
 def _std(values):

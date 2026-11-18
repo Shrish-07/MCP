@@ -1,4 +1,4 @@
-"""Time-ordered paired strategy evaluation, without retuning or claiming an edge."""
+"""Offline L6 paired evaluation with time-ordered, matched outcomes."""
 
 import math
 import statistics
@@ -37,7 +37,9 @@ def evaluate(pairs, folds):
                 raise ValueError(
                     "known execution costs and finite net outcomes required"
                 )
-        if a["decision_at"] != b["decision_at"]:
+        if datetime.fromisoformat(a["decision_at"]) != datetime.fromisoformat(
+            b["decision_at"]
+        ):
             raise ValueError("decision windows differ")
         validated.append(pair)
     results = []
@@ -47,7 +49,12 @@ def evaluate(pairs, folds):
             datetime.fromisoformat(fold[key])
             for key in ("train_end", "test_start", "test_end")
         )
-        if not train_end < start < end or previous_end and start < previous_end:
+        if (
+            not all(stamp.utcoffset() is not None for stamp in (train_end, start, end))
+            or not train_end < start < end
+            or previous_end is not None
+            and start < previous_end
+        ):
             raise ValueError("folds must be ordered and nonoverlapping")
         previous_end = end
         train = [

@@ -3,10 +3,10 @@ import math
 from utils.freshness import fresh_timestamp
 
 
-def eligibility(features, quote, cfg):
+def feature_gate_reasons(features, cfg):
     reasons = []
     for name in ("price", "dollar_volume30", "vol30_annual_pct", "bar_count"):
-        if not isinstance(features.get(name), (int, float)) or not math.isfinite(
+        if type(features.get(name)) not in (int, float) or not math.isfinite(
             features[name]
         ):
             reasons.append("invalid_" + name)
@@ -20,8 +20,14 @@ def eligibility(features, quote, cfg):
         reasons.append("volatility_cap")
     if features["bar_count"] < cfg["min_bars"]:
         reasons.append("history_floor")
+    return reasons
+
+
+def eligibility(features, quote, cfg):
+    reasons = feature_gate_reasons(features, cfg)
     if (
         quote is None
+        or not math.isfinite(quote.price)
         or quote.price <= 0
         or not fresh_timestamp(quote.timestamp, 5 * 86400)
     ):

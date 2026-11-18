@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from core.evaluation import evaluate
+from core.discovery.evaluation import evaluate
 from utils.instance_lock import InstanceLock
 
 

@@ -23,7 +23,7 @@ python -m venv .venv
 .venv\Scripts\activate        # Windows   (Linux/macOS: source .venv/bin/activate)
 pip install -r requirements.txt
 pip install -r requirements-dev.txt
-# Optional — only if you enable sentiment_selection in config/settings.json:
+# Optional for discovery or legacy sentiment selection:
 # pip install -r requirements-ml.txt
 copy .env.example .env         # fill in your two API keys
 ```
@@ -33,12 +33,16 @@ Run everything in **dry-run** (`execution.dry_run: true` is the shipped default)
 ## Running the tests
 
 ```bash
-pytest                                    # light suite (default; heavy tests excluded)
+python -B scripts/run_offline_tests.py    # guarded light suite
 pytest -m heavy                           # includes the ModernBERT model tests (~large download)
 python scripts/verify_weekly_layer.py     # offline-deterministic weekly-selection harness
 ```
 
-CI runs the light suite and the verification harness on every PR (Python 3.13, Linux).
+CI runs the guarded light suite and the verification harness on every PR
+(Python 3.13, Linux). Use canonical package imports such as
+`core.data.ingest`, `core.decision.engine`, `core.position.manager`, and
+`core.discovery.evaluation`. The shared Finnhub windowed fetcher lives in
+`core.data.company_news`. The weekly selection policy lives in `core.weekly`.
 
 ## Pull request checklist
 

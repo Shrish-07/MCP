@@ -12,14 +12,8 @@ this checkout. Live submissions require both `execution.dry_run: false` and
 Authentication and account verification are described in
 [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md). The full system walkthrough is in
 [docs/END_TO_END.md](docs/END_TO_END.md).
-The latest offline engineering fixes and verification are in
-[docs/MASTER_REMEDIATION.md](docs/MASTER_REMEDIATION.md).
-The November 16 operating procedure and standalone wiring audit are in
-[docs/MONDAY_READINESS.md](docs/MONDAY_READINESS.md).
-Earlier evidence remains in
-[docs/PRODUCTION_READINESS_AUDIT.md](docs/PRODUCTION_READINESS_AUDIT.md).
-Those reports describe their respective runs. Current state is established by
-reconciliation in the running backend.
+The [verification archive](docs/verification/README.md) indexes dated audits.
+Current account state comes from reconciliation in the running backend.
 
 ## Start locally when ready
 
@@ -54,7 +48,7 @@ UTF-8 and pinned; optional ML dependencies are separate.
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-dev.txt -r requirements-ml.txt
 .\.venv\Scripts\python.exe -m pip check
-.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -B scripts/run_offline_tests.py
 .\.venv\Scripts\python.exe scripts/verify_weekly_layer.py
 .\.venv\Scripts\python.exe scripts/preflight.py
 ```
@@ -182,6 +176,12 @@ When discovery is enabled, stale or invalid output leaves the new-name set
 empty. The legacy selector is available when discovery is off. Stops and
 accounting remain active in either mode.
 
+Discovery ranking reuses a complete feature snapshot for the latest completed
+NYSE session when the universe and feature settings match. A decision cycle
+selects candidates and reads their evidence from the same shortlist run.
+The [walkthrough](docs/END_TO_END.md#c-discovery-l0l6) describes the stage
+contracts, schedules, and paired evaluation inputs.
+
 ## Scheduler and operations
 
 All jobs share one manager, locks, configuration revision and health ledger:
@@ -190,7 +190,8 @@ All jobs share one manager, locks, configuration revision and health ledger:
 | --- | --- |
 | Decision cycles | Trading days 09:35, 12:30, 15:30 |
 | Exit monitor | Every 15 seconds in regular NYSE sessions |
-| Nightly held ATR/features/reviews | 20:00 by default, configurable with discovery enabled |
+| Nightly held ATR/features/reviews | 20:00 |
+| Discovery feature refresh | `discovery.schedule.feature_hour_et`, when enabled |
 | Discovery ranking | Sunday 20:00, only when enabled |
 | Fill attribution | Weekdays 16:05 by default |
 | Heartbeat watchdog | Every 30 seconds |

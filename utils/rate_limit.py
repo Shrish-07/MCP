@@ -1,6 +1,6 @@
 """Shared asynchronous rate limiter (sliding-window).
 
-Originally lived in core/weekly_news.py; promoted here so every outbound
+Shared here so every outbound
 HTTP component (daily NewsFetcher, WeeklyNewsFetcher) uses the same
 discipline against Finnhub's free-tier limit.
 """
